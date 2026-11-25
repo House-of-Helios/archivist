@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Warm paper, one red accent, one serif for titles.
+/// Warm paper, one lavender accent, one serif for titles.
 enum Palette {
     /// Picks the dark or light value from the window's own appearance.
     private static func pair(_ dark: UInt32, _ light: UInt32) -> Color {
@@ -17,8 +17,10 @@ enum Palette {
     static let ink = pair(0xece3d1, 0x221d16)        // reading text
     static let soft = pair(0x9d9484, 0x6b6253)       // second voice: kinds, notes
     static let rule = pair(0x3a3328, 0xd8ccb6)       // the only lines
-    static let accent = pair(0xd04144, 0xc03a3d)     // the app's red (the icon's ground): Start, selection, focus
-    static let onAccent = pair(0xfff6ef, 0xfff6ef)   // text on the red
+    static let accent = pair(0x9b90c2, 0x9b90c2)     // the app's lavender (Helios, 2026-11-25): Start, selection, focus
+    static let onAccent = pair(0x1f1b2e, 0x1f1b2e)   // dark text on the lavender (white read at 2.9:1, dark at 7:1)
+    static let good = pair(0x8cc084, 0x3f7f3a)       // "up to date"
+    static let due = pair(0xe06a6c, 0xb8393c)        // "to back up", "not backed up yet"
     static let warn = pair(0xd6a467, 0x93601d)       // a problem worth reading
 }
 

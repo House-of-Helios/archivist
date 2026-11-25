@@ -348,7 +348,7 @@ struct SourceRow: View {
 
     private var statusColor: Color {
         guard let v = survey, v.compared, !source.skip else { return Palette.soft }
-        return !v.destinationExists || v.toCopy > 0 ? Palette.ink : Palette.soft   // not the red: it would read as an error
+        return !v.destinationExists || v.toCopy > 0 ? Palette.due : Palette.good   // red: still to copy; green: up to date
     }
 
 }
