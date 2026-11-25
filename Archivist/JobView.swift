@@ -33,10 +33,10 @@ struct JobView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .top, spacing: 0) {   // top: a tall column never pushes its title up
-                SourcesPane(view: self)
+                SourcesPane(view: self).frame(minHeight: 0)
                 DestinationPane(view: self)
                     .frame(width: 280)
-                    .frame(maxHeight: .infinity, alignment: .top).clipped()   // never taller than Sources: the row ends at the bottom bar
+                    .frame(minHeight: 0, maxHeight: .infinity, alignment: .top).clipped()   // never taller than Sources, and no say in the window's smallest size (Start ↔ Stop changed it)
                     
             }
             BottomBar(view: self)
@@ -243,7 +243,7 @@ struct SourcesPane: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center) {   // centred in a fixed row, like Destination's: the titles' tops line up
                 Text("Sources").font(Typeface.title(24)).foregroundStyle(Palette.ink)
-                AddButton(view: view)
+                AddButton(view: view).offset(y: 3)   // the serif title sits low in its line: everything in the row centres on its letters
                 Spacer()
                 // What this backup will copy, between the title and the count: it lived under the space
                 // bar, and appearing there made the Destination box grow and push the page.
@@ -252,13 +252,16 @@ struct SourcesPane: View {
                     let free = view.space?.free ?? .max
                     Text(needed <= free ? "This backup needs \(bytes(needed))" : "Needs \(bytes(needed)), \(bytes(needed - free)) more than is free")
                         .font(Typeface.text(13, needed <= free ? .regular : .semibold))
-                        .foregroundStyle(needed <= free ? Palette.ink : Palette.warn)
+                        .foregroundStyle(needed <= free ? Palette.soft : Palette.warn)
                         .lineLimit(1)
+                        .offset(y: 1.5)
                     Spacer()
                 }
                 if !job.sources.isEmpty {
-                    Text("\(job.sources.count) \(job.sources.count == 1 ? "item" : "items"), \(bytes(total))")
+                    (Text("\(job.sources.count) \(job.sources.count == 1 ? "item" : "items"), ")
+                     + Text(bytes(total)).fontWeight(.semibold).foregroundColor(Palette.ink))
                         .font(Typeface.text(13)).foregroundStyle(Palette.soft)
+                        .offset(y: 1.5)
                 }
             }
             .frame(height: 30)
@@ -400,6 +403,7 @@ struct DestinationPane: View {
                 Spacer()
                 Button { NotificationCenter.default.post(name: .showSettings, object: nil) } label: { Emoji(name: "gear", size: 20) }
                     .buttonStyle(.plain).help("Settings: name, picture, schedule, drive type, delete")
+                    .offset(y: 3)   // centred on the title's letters, like Sources' plus
             }
             .frame(height: 30)
             .frame(height: Header.height, alignment: .bottom).padding(.bottom, Header.below)   // same box as Sources'
@@ -583,7 +587,7 @@ struct BottomBar: View {
             let estimating = r.running && !r.finishing && r.remaining(at: tl.date) == nil
             GeometryReader { g in
                 let w = g.size.width - Double(3 * max(chunks.count - 1, 0))
-                VStack(alignment: .leading, spacing: 5) {
+                VStack(alignment: .leading, spacing: 0) {
                     ZStack(alignment: .leading) {
                         if chunks.isEmpty { Rectangle().fill(Palette.rule) }
                         HStack(spacing: 3) {
@@ -644,11 +648,12 @@ struct BottomBar: View {
                         .foregroundStyle(r.running ? Palette.ink : Palette.soft)
                         .frame(maxWidth: .infinity)
                     }
+                    .frame(height: 27)   // centred between the bar and the window's bottom edge
                 }
             }
         }
-        .frame(height: 28 + 5 + 16)
-        .padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 6)
+        .frame(height: 28 + 27)
+        .padding(.horizontal, 16).padding(.top, 10)
         .background(Palette.ground)
         .overlay(alignment: .top) { Rectangle().fill(Palette.rule).frame(height: 1) }
     }

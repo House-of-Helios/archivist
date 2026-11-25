@@ -23,7 +23,7 @@ struct ArchivistApp: App {
             RootView()
                 .environment(store)
                 .modifier(AppearanceChoice())
-                .frame(width: 860).frame(minHeight: 427)   // width fixed; smallest holds exactly four source rows (measured: the window adds 32 for its title bar)
+                .frame(width: 860).frame(minHeight: 417)   // width fixed; smallest holds exactly four source rows (measured: the window adds 32 for its title bar)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 860, height: 580)
