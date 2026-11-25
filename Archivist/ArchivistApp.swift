@@ -22,7 +22,7 @@ struct ArchivistApp: App {
             RootView()
                 .environment(store)
                 .modifier(AppearanceChoice())
-                .frame(minWidth: 780, minHeight: 540)
+                .frame(minWidth: 780, maxWidth: 960, minHeight: 440)   // wider adds nothing; taller shows more sources
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 860, height: 580)
@@ -44,7 +44,7 @@ struct RootView: View {
                 Color.clear
             }
         }
-        .background(Palette.ground)
+        .background(Palette.ground.ignoresSafeArea())   // paper to every edge: no strip at the smallest size
         .ignoresSafeArea(.container, edges: .top)   // the strip makes room for the traffic lights itself; a changing inset jumped the layout
         .tint(Palette.accent)
         .task {   // scheduled backups, while Archivist is open
@@ -57,6 +57,7 @@ struct RootView: View {
             if store.jobs.isEmpty { store.add() }
             selection = selection ?? store.jobs.first?.id
             DevLog.write("app open: \(store.jobs.count) backups")
+            for w in NSApp.windows { w.backgroundColor = NSColor(Palette.ground) }   // the window's own fill, under everything
             Scheduler.sync(store.jobs)   // removes the retired background helper if an older build left one
             #if DEBUG
             DevControl.start(store) { selection = $0 }

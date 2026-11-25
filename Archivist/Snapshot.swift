@@ -48,6 +48,7 @@ enum Snapshot {
         running.eta = 255
         running.debugAnchor(255)
         running.currentSource = "Workouts"
+        running.pace = 0.3
 
         let update = UpdateInfo(version: "0.0.2", notes: "Folders with their own Finder icon show it.", history: [UpdateNote(version: "0.0.2", notes: "Folders with their own Finder icon show it.")])
         func window(_ job: Job, _ r: Runner, _ s: [Source.ID: Survey], _ d: [String: Drive], space: Bool, missing: Bool = false, update: UpdateInfo? = nil) -> AnyView {

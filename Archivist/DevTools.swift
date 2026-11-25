@@ -144,6 +144,11 @@ enum DevControl {
             guard let j = job(cmd) else { return ["ok": false, "error": "no such job"] }
             store.remove(j.id)
             return ["ok": true]
+        case "resize":   // {"cmd":"resize","w":780,"h":400}: the main window's content size
+            guard let w = cmd["w"] as? Double, let h = cmd["h"] as? Double,
+                  let win = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }) else { return ["ok": false] }
+            win.setContentSize(NSSize(width: w, height: h))
+            return ["ok": true, "size": "\(win.frame.size)"]
         case "update":   // press "Install & restart" on whatever GitHub offers
             Task { @MainActor in
                 let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"

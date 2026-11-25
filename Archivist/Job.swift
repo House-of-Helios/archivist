@@ -340,7 +340,13 @@ final class Runner {
     var destination: Drive?
     var problems: [String] = []
     private var engine: Engine?
-    private var lastSample = (Date(), Int64(0))
+    private var lastSample = (Date(), Int64(0), 0)
+    var filesPerSecond: Double = 0
+    /// How fast the destination drive is working now against the best it has done (0…1), remembered
+    /// per drive across runs: an SMR drive busy cleaning shows Slow before anyone wonders.
+    var pace: Double?
+    @ObservationIgnored private var paceKey = ""
+    @ObservationIgnored private var paceStart = Date()
 
     func start(_ job: Job, planned: (files: Int, bytes: Int64) = (0, 0), done: @escaping (_ summary: String, _ state: String, _ past: String?, _ total: Int64) -> Void) {
         guard !running else { return }
@@ -357,6 +363,10 @@ final class Runner {
         shownFraction = 0
         problems = []
         bytesPerSecond = 0
+        filesPerSecond = 0
+        pace = nil
+        paceStart = Date()
+        paceKey = "pace:" + (job.destination.map { p in let c = (p as NSString).pathComponents; return c.count > 2 && c[1] == "Volumes" ? c[2] : "/" } ?? "")
         let runs = job.sources.filter { !$0.skip }.compactMap { s in job.target(for: s).map { (s, $0) } }
         if let d = job.destination, let root = job.pastRoot {   // earlier names (_Past, _Archive) -> _📚archive, once
             for old in Names.legacyPasts where !FileManager.default.fileExists(atPath: root) {
@@ -398,7 +408,7 @@ final class Runner {
                     self.source = try? Drive.of(path: src)
                     self.destination = try? Drive.of(path: FileManager.default.fileExists(atPath: dst) ? dst : (dst as NSString).deletingLastPathComponent)
                     if let s = self.source, let d = self.destination { self.lanes = Lanes.choose(source: s.kind, destination: d.kind) }
-                    self.lastSample = (Date(), self.overall.bytes)
+                    self.lastSample = (Date(), self.overall.bytes, self.overall.files)
                 }
                 engine.onProgress = { p in DispatchQueue.main.async { self.tick(p) } }
                 do {
@@ -420,7 +430,7 @@ final class Runner {
                     problems += r.problems
                     stopped = r.stopped
                 } catch {
-                    problems.append("\(error)")
+                    problems.append("Folder \(source.name) not copied: \(error)")
                     DevLog.write("source failed: \(source.name): \(error)")
                 }
             }
@@ -539,7 +549,21 @@ final class Runner {
         }
         let b = overall.bytes
         let dt = Date().timeIntervalSince(lastSample.0)
-        if dt >= 0.5 { bytesPerSecond = bytesPerSecond == 0 ? Double(b - lastSample.1) / dt : bytesPerSecond * 0.7 + Double(b - lastSample.1) / dt * 0.3; lastSample = (Date(), b) }
+        let f = overall.files
+        if dt >= 0.5 {
+            let bNow = Double(b - lastSample.1) / dt, fNow = Double(f - lastSample.2) / dt
+            bytesPerSecond = bytesPerSecond == 0 ? bNow : bytesPerSecond * 0.85 + bNow * 0.15
+            filesPerSecond = filesPerSecond == 0 ? fNow : filesPerSecond * 0.85 + fNow * 0.15
+            lastSample = (Date(), b, f)
+            // Best this drive has done, by files/s (small files) and by bytes/s (big ones); the pace is
+            // whichever kind of work it is doing best at right now, against that best.
+            let d = UserDefaults.standard
+            let bestF = max(d.double(forKey: paceKey + ".f"), filesPerSecond), bestB = max(d.double(forKey: paceKey + ".b"), bytesPerSecond)
+            if Date().timeIntervalSince(paceStart) > 15 {   // the first seconds are cache, not the drive
+                d.set(bestF, forKey: paceKey + ".f"); d.set(bestB, forKey: paceKey + ".b")
+                pace = min(1, max(bestF > 0 ? filesPerSecond / bestF : 0, bestB > 0 ? bytesPerSecond / bestB : 0))
+            }
+        }
     }
 }
 

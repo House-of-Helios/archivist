@@ -360,6 +360,8 @@ struct DropHint: View {
 struct DestinationPane: View {
     let view: JobView
     @State private var over = false
+    @State private var height: CGFloat = 600
+    private var compact: Bool { height < 420 }   // a short window: smaller picture, no drive-kind line, tighter gaps
 
     var body: some View {
         let job = view.job
@@ -378,24 +380,25 @@ struct DestinationPane: View {
                 Missing(view: view, path: path)
             } else if let path = job.destination {
                 VStack(spacing: 8) {
-                    Badge(icon: job.icon, hex: job.color, size: 66)
+                    Badge(icon: job.icon, hex: job.color, size: compact ? 44 : 66)
                         .overlay(alignment: .bottomTrailing) {
                             if let d { Emoji(name: driveSymbol(d), size: 22).padding(3).background(Circle().fill(Palette.raised)).offset(x: 8, y: 4) }
                         }
                     Text(location(path, d)).font(Typeface.text(15, .semibold)).foregroundStyle(Palette.ink)
                         .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
-                    if let d { Text(kindWords(d) + (job.destinationKind == nil ? "" : ", set by hand")).font(Typeface.text(12)).foregroundStyle(Palette.soft) }
+                    if let d, !compact { Text(kindWords(d) + (job.destinationKind == nil ? "" : ", set by hand")).font(Typeface.text(12)).foregroundStyle(Palette.soft) }
                 }
                 .frame(maxWidth: .infinity)
 
-                if let space = view.space { SpaceBar(free: space.free, total: space.total, needed: needed, hex: job.color).padding(.top, 14) }
+                if let space = view.space { SpaceBar(free: space.free, total: space.total, needed: needed, hex: job.color).padding(.top, compact ? 8 : 14) }
 
-                HStack(spacing: 8) {
-                    Button("Change location", action: view.chooseDestination).buttonStyle(QuietButton())
-                    Button { NSWorkspace.shared.open(URL(fileURLWithPath: path)) } label: { Image(systemName: "magnifyingglass") }
-                        .buttonStyle(QuietButton()).help("Open in Finder")
-                }
-                .frame(maxWidth: .infinity).padding(.top, 12)
+                Button("Change location", action: view.chooseDestination).buttonStyle(QuietButton())
+                    .overlay(alignment: .trailing) {   // centred on its own; the magnifier hangs off its right
+                        Button { NSWorkspace.shared.open(URL(fileURLWithPath: path)) } label: { Image(systemName: "magnifyingglass") }
+                            .buttonStyle(QuietButton()).help("Open in Finder")
+                            .fixedSize().alignmentGuide(.trailing) { d in d[.leading] - 8 }
+                    }
+                    .frame(maxWidth: .infinity).padding(.top, compact ? 8 : 12)
                 .allowsHitTesting(!view.runner.running)
 
                 Spacer(minLength: 8)
@@ -437,6 +440,7 @@ struct DestinationPane: View {
         }
         .padding(.horizontal, 24).padding(.bottom, 18)
         .frame(maxHeight: .infinity, alignment: .top)
+        .background(GeometryReader { g in Color.clear.onAppear { height = g.size.height }.onChange(of: g.size.height) { _, h in height = h } })
         .background(Palette.raised)
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Palette.accent.opacity(over ? 0.8 : 0), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4])).padding(8))
         .dropDestination(for: URL.self) { urls, _ in
@@ -497,7 +501,10 @@ struct ProblemsLink: View {
     let list: [String]
     @State private var open = false
     var body: some View {
-        Button(list.count == 1 ? "1 file not copied" : "\(list.count) files not copied") { open = true }
+        let folders = list.filter { $0.hasPrefix("Folder ") }.count, files = list.count - folders
+        let words = [folders > 0 ? "\(folders) \(folders == 1 ? "folder" : "folders")" : nil,
+                     files > 0 ? "\(files) \(files == 1 ? "file" : "files")" : nil].compactMap { $0 }
+        Button(words.joined(separator: ", ") + " not copied") { open = true }
             .buttonStyle(.plain).font(Typeface.text(12, .semibold)).foregroundStyle(Palette.warn)
             .popover(isPresented: $open) { Problems(list: list).padding(16).frame(width: 380) }
     }
@@ -513,7 +520,7 @@ struct SpaceBar: View {
     var body: some View {
         let used = Double(total - free) / Double(max(total, 1))
         let after = min(1, used + Double(needed) / Double(max(total, 1)))
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .center, spacing: 6) {
             GeometryReader { g in
                 ZStack(alignment: .leading) {
                     // In the backup's colours: what is already on the drive soft, what this backup adds full.
@@ -528,6 +535,7 @@ struct SpaceBar: View {
                 Text(needed <= free ? "This backup needs \(bytes(needed))" : "Needs \(bytes(needed)): \(bytes(needed - free)) more than is free")
                     .font(Typeface.text(12, needed <= free ? .regular : .semibold))
                     .foregroundStyle(needed <= free ? Palette.ink : Palette.warn)
+                    .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -591,12 +599,27 @@ struct BottomBar: View {
                     }
                     .frame(height: 28)
                     .clipped()
+                    ZStack {
+                    if r.running, !r.finishing, let pace = r.pace {
+                        HStack {
+                            ZStack(alignment: .leading) {   // now, against the best this drive has done
+                                Capsule().fill(Palette.rule)
+                                Capsule().fill(Nippon.color(job.color)).frame(width: 70 * pace)
+                            }
+                            .frame(width: 70, height: 5)
+                            .animation(.easeInOut(duration: 1), value: pace)
+                            Spacer()
+                            Text(pace >= 0.7 ? "Fast" : pace >= 0.4 ? "Good" : pace >= 0.15 ? "Slow" : "Very slow")
+                                .font(Typeface.text(12)).foregroundStyle(pace >= 0.4 ? Palette.soft : Palette.warn)
+                        }
+                    }
                     Text(r.stopping ? "Stopping…" : r.finishing ? "Finishing…"
                          : r.running ? (estimating ? "Calculating time left…" : "\(Int(r.steadyFraction(at: tl.date) * 100))% done, \(r.etaWords(at: tl.date))")
                          : (job.ready && view.destinationState == .present ? "Ready to start" : " "))
                         .font(r.running && !estimating ? Typeface.number(12.5) : Typeface.text(12))
                         .foregroundStyle(r.running ? Palette.ink : Palette.soft)
                         .frame(maxWidth: .infinity)
+                    }
                 }
             }
         }
