@@ -8,13 +8,10 @@ A backup has sources (what to copy), a destination (where it goes), and one butt
 
 Drop folders, or a whole drive, on the left side, or click the dashed box and choose. Each source gets its own picture and colour, a size, and a line saying where it stands: "not backed up yet", "2 changes to back up (12 MB)", "up to date".
 
-The **⋯** menu on a source row:
+On the right of each source, a menu chooses what to copy:
 
-- **Pause**: keep the source in the list but don't copy it until you choose Resume.
-- **Skip a folder inside…**: choose folders inside this source to leave out.
-- **Skip junk files**: leave out caches, temp files and `node_modules`.
-- **Copy everything again**: ignore what is already there and copy the whole source afresh.
-- **Show in Finder**.
+- **Skip junk files** (the default): leave out caches, temp files, and build folders that rebuild from the code beside them, such as `node_modules`, or `target` next to a `Cargo.toml`.
+- **Copy everything**: copy every file in the folder.
 
 The **ⓧ** removes the source from the backup. Nothing at the destination is touched by that.
 

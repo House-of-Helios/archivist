@@ -9,11 +9,15 @@ struct Source: Codable, Identifiable, Hashable {
     var skip = false                 // "skip next time": kept in the list, not copied
     var leftOut: [String] = []       // subfolders, relative to this source
     var patterns: [String] = []      // names left out anywhere inside (`*.tmp`); older saves only
-    var skipJunk = false             // "Skip junk files": Source.junk, anywhere inside
+    var skipJunk = true              // "Skip junk files" (the default for a new source): Source.junk, anywhere inside
     var addedAt: Date?               // when it was dropped in: its row splashes if that was moments ago
 
     /// Throwaway files any app rebuilds on its own.
-    static let junk = ["Caches", ".cache", "*.tmp", "*.temp", "node_modules", "DerivedData", ".Trash", "*.swp"]
+    static let junk = ["Caches", ".cache", "*.tmp", "*.temp", "node_modules", "DerivedData", ".Trash", "*.swp",
+                       // build output that rebuilds from the code beside it
+                       ".build", "__pycache__", ".venv", ".next", ".turbo", ".vite", ".gradle", ".pytest_cache", ".mypy_cache",
+                       "target@Cargo.toml", "build@CMakeLists.txt", "build@package.json", "build@build.gradle", "build@build.gradle.kts",
+                       "dist@package.json", "dist@pyproject.toml", "dist@setup.py"]
     /// What the engine leaves out by name.
     var namesLeftOut: [String] { patterns + (skipJunk ? Source.junk : []) }
     var icon = Source.icons.randomElement()!   // plants and food: sources; animals: backups
@@ -30,7 +34,7 @@ struct Source: Codable, Identifiable, Hashable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
         path = try c.decode(String.self, forKey: .path)
-        skip = try c.decodeIfPresent(Bool.self, forKey: .skip) ?? false
+        skip = false   // Pause is gone from the app: a source saved paused copies again
         leftOut = try c.decodeIfPresent([String].self, forKey: .leftOut) ?? []
         patterns = try c.decodeIfPresent([String].self, forKey: .patterns) ?? []
         skipJunk = try c.decodeIfPresent(Bool.self, forKey: .skipJunk) ?? false

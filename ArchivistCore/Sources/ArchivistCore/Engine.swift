@@ -147,10 +147,18 @@ public final class Engine {
         dstScanner.skipAppleDouble = fat.contains(dst.fileSystem)
         dstScanner.patterns = options.patterns + Options.alwaysLeftOut // left out = not managed: never retired to _Past either
 
+        srcScanner.shouldStop = { [unowned self] in self.isStopped }
+        dstScanner.shouldStop = srcScanner.shouldStop
         let (srcEntries, srcProblems) = try srcScanner.scan(source)
         var (dstEntries, dstProblems) = FileManager.default.fileExists(atPath: destination) ? try dstScanner.scan(destination) : ([], [])
         problems += srcProblems
         problems += dstProblems
+        // Stopped while scanning: a half scan must never decide what is gone. Nothing was written.
+        if isStopped {
+            var r = Report(source: src, destination: dst, lanes: lanes)
+            r.problems = problems; r.stopped = true; r.seconds = Date().timeIntervalSince(start)
+            return r
+        }
         problems += srcScanner.otherVolumes.map { "\($0): another drive mounted here; not copied" }
         // An empty source next to a full backup is almost always a drive that is not there
         // (an unmounted share, a disconnected disk), never a wish to archive everything.

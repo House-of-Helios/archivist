@@ -28,6 +28,8 @@ struct JobView: View {
         store.update(j)
     }
 
+    @State private var showingSettings = false
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
@@ -38,6 +40,26 @@ struct JobView: View {
             BottomBar(view: self)
         }
         .background(Palette.ground)
+        .overlay {
+            if showingSettings {
+                GeometryReader { g in
+                    ZStack {
+                        Color.black.opacity(0.35).ignoresSafeArea()
+                            .contentShape(Rectangle())
+                            .onTapGesture { showingSettings = false }   // a click outside closes it
+                        SettingsSheet(view: self, close: { showingSettings = false })
+                            .frame(width: 480, height: min(640, g.size.height - 32))   // never hangs past the window
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .shadow(color: .black.opacity(0.25), radius: 20, y: 6)
+                    }
+                    .frame(width: g.size.width, height: g.size.height)
+                }
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: showingSettings)
+        .onReceive(NotificationCenter.default.publisher(for: .showSettings)) { _ in showingSettings = true }
+        .onExitCommand { showingSettings = false }
         .task(id: refreshKey) { await refresh() }
         .task(id: watchKey) {
             // Recheck when anything changes on either side (macOS file events; a network share
@@ -160,22 +182,6 @@ struct JobView: View {
         }
     }
 
-    func leaveOutSubfolder(_ s: Source) {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = true
-        panel.directoryURL = URL(fileURLWithPath: s.readPath)
-        panel.prompt = "Leave out"
-        guard panel.runModal() == .OK else { return }
-        let root = URL(fileURLWithPath: s.readPath).resolvingSymlinksInPath().path
-        // Stored relative to the source; a folder outside it can't be left out of it.
-        let rel = panel.urls.compactMap { u -> String? in
-            let p = u.resolvingSymlinksInPath().path
-            return p.hasPrefix(root + "/") ? String(p.dropFirst(root.count + 1)) : nil
-        }
-        update(s) { $0.leftOut = Array(Set($0.leftOut + rel)).sorted() }
-    }
 
     func update(_ s: Source, _ change: (inout Source) -> Void) {
         edit { j in if let i = j.sources.firstIndex(where: { $0.id == s.id }) { change(&j.sources[i]) } }
@@ -226,7 +232,7 @@ struct SourcesPane: View {
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Palette.accent.opacity(over ? 0.8 : 0), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4])).padding(8))
         .dropDestination(for: URL.self) { urls, _ in
             let dirs = urls.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-            guard !dirs.isEmpty, !view.runner.running else { return false }
+            guard !dirs.isEmpty else { return false }   // allowed mid-backup: the running copy took its list at Start
             view.add(dirs)
             return true
         } isTargeted: { over = $0 }
@@ -251,28 +257,22 @@ struct SourceRow: View {
                 .background(Splash(hex: s.color, addedAt: s.addedAt))
             VStack(alignment: .leading, spacing: 3) {
                 Text(s.name).font(Typeface.text(15, .semibold)).foregroundStyle(Palette.ink.opacity(s.skip ? 0.5 : 1))
-                Text(status).font(Typeface.text(12.5)).foregroundStyle(statusColor)
-                if !s.leftOut.isEmpty || !s.namesLeftOut.isEmpty {
-                    Text(rules).font(Typeface.text(12)).foregroundStyle(Palette.soft)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Text(status).font(Typeface.text(12.5)).foregroundStyle(statusColor).lineLimit(1)
             }
             Spacer(minLength: 8)
             Menu {
-                Button(s.skip ? "Resume" : "Pause: don't copy until resumed") { view.update(s) { $0.skip.toggle() } }
-                Button("Skip a folder inside \(s.name)…") { view.leaveOutSubfolder(s) }
-                Toggle("Skip junk files: caches, temp files, node_modules", isOn: Binding(get: { s.skipJunk }, set: { v in view.update(s) { $0.skipJunk = v } }))
-                if !s.leftOut.isEmpty || !s.namesLeftOut.isEmpty {
-                    Button("Copy everything again") { view.update(s) { $0.leftOut = []; $0.patterns = []; $0.skipJunk = false } }
+                Button { view.update(s) { $0.skipJunk = true } } label: {
+                    Text("Skip junk files") + Text(s.skipJunk ? "  ✓" : "")
                 }
-                Divider()
-                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: s.path)]) }
+                Button { view.update(s) { $0.skipJunk = false; $0.leftOut = []; $0.patterns = [] } } label: {
+                    Text("Copy everything") + Text(s.skipJunk ? "" : "  ✓")
+                }
             } label: {
-                Text("• • •").font(.system(size: 9, weight: .bold))   // a menu draws text, not shapes, as its label
+                Text(s.skipJunk ? "Skip junk files" : "Copy everything").font(Typeface.text(12.5))
             }
-            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            .tint(Palette.soft)   // grey, not the app's teal
-            .help("Pause or skip parts of \(s.name)")
+            .menuStyle(.borderlessButton).fixedSize()
+            .tint(Palette.soft)
+            .help("Junk files: caches, temp files, and build folders that rebuild from the code beside them")
             Button { view.edit { $0.sources.removeAll { $0.id == s.id } } } label: {
                 Image(systemName: "xmark.circle.fill").font(.system(size: 17))
             }
@@ -293,7 +293,8 @@ struct SourceRow: View {
         if !v.compared { return "\(size), calculating…" }
         if !v.destinationExists { return "\(size), not backed up yet" }
         if v.toCopy == 0 { return "\(size), up to date" }
-        return "\(size), \(v.toCopy) \(v.toCopy == 1 ? "change" : "changes") to back up (\(bytes(v.bytesToCopy)))"
+        if v.bytesToCopy >= v.bytes { return "\(size), not backed up yet" }   // everything is new: the same size twice says nothing
+        return v.bytesToCopy > 0 ? "\(size), \(bytes(v.bytesToCopy)) to back up" : "\(size), small changes to back up"
     }
 
     private var statusColor: Color {
@@ -301,9 +302,6 @@ struct SourceRow: View {
         return !v.destinationExists || v.toCopy > 0 ? Palette.ink : Palette.soft   // not the red: it would read as an error
     }
 
-    private var rules: String {
-        "Skipping: " + (source.leftOut.map { ($0 as NSString).lastPathComponent } + source.patterns + (source.skipJunk ? ["junk files"] : [])).joined(separator: ", ")
-    }
 }
 
 struct DropHint: View {
@@ -330,7 +328,6 @@ struct DropHint: View {
 struct DestinationPane: View {
     let view: JobView
     @State private var over = false
-    @State private var settings = false
 
     var body: some View {
         let job = view.job
@@ -340,10 +337,8 @@ struct DestinationPane: View {
             HStack(alignment: .firstTextBaseline) {
                 Text("Destination").font(Typeface.title(24)).foregroundStyle(Palette.ink)
                 Spacer()
-                Button { settings = true } label: { Emoji(name: "gear", size: 20) }
+                Button { NotificationCenter.default.post(name: .showSettings, object: nil) } label: { Emoji(name: "gear", size: 20) }
                     .buttonStyle(.plain).help("Settings: name, picture, schedule, drive type, delete")
-                    .sheet(isPresented: $settings) { SettingsSheet(view: view) }
-                    .onReceive(NotificationCenter.default.publisher(for: .showSettings)) { _ in settings = true }
             }
             .frame(height: Header.height, alignment: .bottom).padding(.bottom, Header.below)   // same box as Sources'
 
@@ -385,16 +380,6 @@ struct DestinationPane: View {
                 .frame(maxWidth: .infinity)
 
                 Spacer(minLength: 8)   // Start sits centred between Change location and the last backup
-                if job.schedule != .byHand {
-                    Button { settings = true } label: {
-                        HStack(spacing: 6) {
-                            Emoji(name: "spiral_calendar", size: 15)
-                            Text(job.schedule.words).font(Typeface.text(12)).foregroundStyle(Palette.soft)
-                        }
-                    }
-                    .buttonStyle(.plain).frame(maxWidth: .infinity).padding(.top, 8)
-                }
-
                 if view.interrupted && !view.runner.running {
                     Text("The last backup was cut off. Start it again to finish; nothing half-copied is kept.")
                         .font(Typeface.text(11.5, .semibold)).foregroundStyle(Palette.warn)
@@ -405,6 +390,14 @@ struct DestinationPane: View {
                 }
                 Text("Last backup: " + (job.lastRun.map { lastWords($0, job.lastBytes) } ?? "—"))
                     .font(Typeface.text(12)).foregroundStyle(Palette.soft).frame(maxWidth: .infinity).padding(.top, 8)
+                Button { NotificationCenter.default.post(name: .showSettings, object: nil) } label: {
+                    HStack(spacing: 5) {
+                        Emoji(name: "spiral_calendar", size: 13)
+                        Text("Scheduled backup: " + (job.schedule == .byHand ? "—" : job.schedule.words))
+                            .font(Typeface.text(12)).foregroundStyle(Palette.soft)
+                    }
+                }
+                .buttonStyle(.plain).frame(maxWidth: .infinity).padding(.top, 3)
             } else {
                 DropHint(icon: job.icon, text: "Drop the destination folder here", action: view.chooseDestination)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -556,7 +549,8 @@ struct BottomBar: View {
                             let breath = 0.5 + 0.5 * sin(tl.date.timeIntervalSinceReferenceDate * 2.2)
                             HStack(spacing: 3) {
                                 ForEach(chunks, id: \.s.id) { c in
-                                    Rectangle().fill(Nippon.soft(c.s.color, white: 0.3).opacity(0.25 + 0.3 * breath))
+                                    Rectangle().fill(scheme == .light ? Nippon.color(c.s.color).opacity(0.35 + 0.45 * breath)
+                                                                      : Nippon.soft(c.s.color, white: 0.3).opacity(0.25 + 0.3 * breath))
                                         .frame(width: max(4, w * Double(c.b) / Double(total)))
                                 }
                             }
@@ -679,7 +673,7 @@ enum FolderWatch {
 /// appearance, and deleting it.
 struct SettingsSheet: View {
     let view: JobView
-    @Environment(\.dismiss) private var dismiss
+    var close: () -> Void = {}
     @Environment(JobStore.self) private var store
     @AppStorage("appearance") private var appearance = "system"
     @State private var name = ""
@@ -755,16 +749,15 @@ struct SettingsSheet: View {
                     Button("Delete this backup…", role: .destructive) { confirmDelete = true }
                         .foregroundStyle(Palette.warn)
                     Spacer()
-                    Button("Done") { saveName(); dismiss() }.keyboardShortcut(.defaultAction)
+                    Button("Done") { saveName(); close() }.keyboardShortcut(.defaultAction)
                 }
             }
             .padding(26)
         }
-        .frame(width: 480, height: 640)
         .background(Palette.ground)
         .onAppear { name = job.title }
         .alert("Delete “\(job.title)”?", isPresented: $confirmDelete) {
-            Button("Delete", role: .destructive) { dismiss(); store.remove(job.id) }
+            Button("Delete", role: .destructive) { close(); store.remove(job.id) }
             Button("Keep", role: .cancel) {}
         } message: {
             Text("Only this backup's setup is removed. The copies it already made stay on the destination drive.")

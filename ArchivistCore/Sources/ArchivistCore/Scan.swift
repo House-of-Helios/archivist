@@ -20,12 +20,17 @@ public struct TreeScanner {
     public var excluded: Set<String>          // relative paths, skipped with everything under them
     public var skipRootNames: Set<String>     // names skipped only at the root
     public var skipAppleDouble = false        // `._name` twins on FAT-family drives belong to macOS
-    public var patterns: [String] = []        // names left out anywhere in the tree, fnmatch style (`*.tmp`, `node_modules`)
+    /// Names left out anywhere in the tree, fnmatch style (`*.tmp`, `node_modules`). `name@marker`
+    /// leaves out a folder only when `marker` sits beside it: `target@Cargo.toml` is Rust's build
+    /// output, while a folder named `target` anywhere else is someone's work.
+    public var patterns: [String] = []
     /// Folders that are another drive mounted inside this tree: never entered (a whole-drive
     /// backup must not wander into other volumes; inode numbers are only unique per volume).
     public private(set) var otherVolumes: [String] = []
     /// Folders that could not be listed: what is under them is unknown, not gone.
     public private(set) var unreadable: [String] = []
+    /// Asked between folders: true ends the scan early (Stop must not wait out a million-file walk).
+    public var shouldStop: (() -> Bool)?
 
     public init(excluded: Set<String> = [], skipRootNames: Set<String> = []) {
         self.excluded = excluded
@@ -41,6 +46,7 @@ public struct TreeScanner {
         var problems: [String] = []
         var stack: [String] = [""]
         while let rel = stack.popLast() {
+            if shouldStop?() == true { break }
             let abs = rel.isEmpty ? root : root + "/" + rel
             let children: [Entry]
             do {
@@ -56,7 +62,11 @@ public struct TreeScanner {
                 let name = (e.path as NSString).lastPathComponent
                 if rel.isEmpty && skipRootNames.contains(name) { continue }
                 if skipAppleDouble && name.hasPrefix("._") { continue }
-                if patterns.contains(where: { fnmatch($0, name, 0) == 0 }) { continue }
+                if patterns.contains(where: { p in
+                    guard let at = p.firstIndex(of: "@") else { return fnmatch(p, name, 0) == 0 }
+                    return e.kind == .directory && fnmatch(String(p[..<at]), name, 0) == 0
+                        && access(abs + "/" + p[p.index(after: at)...], F_OK) == 0
+                }) { continue }
                 if excluded.contains(e.path) { continue }
                 if e.kind == .directory {
                     var st = stat()

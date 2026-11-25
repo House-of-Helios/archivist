@@ -14,7 +14,7 @@ report() { # <label> <text>
   local label="$1" text="$2" n
   n=$(grep -cE "/Users/$ME|$HOME|\b$ME\b" <<<"$text" || true)
   [ "$n" -gt 0 ] && { echo "FOUND: $label: $n line(s) with this Mac's home path or user name"; fail=1; }
-  n=$({ grep -oiE '[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}' <<<"$text" || true; } | { grep -viE '^git@|@example\.(com|org)$|@[0-9]x\.(png|jpe?g|pdf|tiff)$' || true; } | sort -u | wc -l | tr -d ' ')
+  n=$({ grep -oiE '[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}' <<<"$text" || true; } | { grep -viE '^git@|@example\.(com|org)$|@[0-9]x\.(png|jpe?g|pdf|tiff)$|@(cargo\.toml|cmakelists\.txt|package\.json|build\.gradle(\.kts)?|pyproject\.toml|setup\.py)$' || true; } | sort -u | wc -l | tr -d ' ')
   [ "$n" -gt 0 ] && { echo "FOUND: $label: $n e-mail address(es)"; fail=1; }
   # The pattern is split ("co-author"+"ed-by") so this file never matches itself.
   n=$(grep -ciE "co-author""ed-by|generated with \[?claude" <<<"$text" || true)

@@ -1,6 +1,6 @@
 # Settings
 
-The ⚙️ at the top right of the Destination panel opens the settings of the selected backup.
+The ⚙️ at the top right of the Destination panel, or the **Scheduled backup** line under it, opens the settings of the selected backup. Click outside the panel to close it.
 
 ![The settings sheet: name, picture, colour, schedule, earlier versions](img/settings.png)
 

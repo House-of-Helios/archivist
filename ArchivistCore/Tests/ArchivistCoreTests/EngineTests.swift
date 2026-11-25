@@ -515,6 +515,29 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(xattrs(dst + "/Photos")[XATTR_FINDERINFO_NAME]?[8], 0x04, "and the folder still says it has a custom icon")
     }
 
+    func testBuildOutputIsLeftOutOnlyBesideItsProjectFile() throws {
+        write("rust/Cargo.toml", "x")
+        write("rust/target/debug/big.bin", "b")
+        write("essay/target/goal.txt", "keep")   // a folder named target that is someone's work
+        var o = Options()
+        o.patterns = ["target@Cargo.toml"]
+        _ = try backup(o)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dst + "/rust/target"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dst + "/rust/Cargo.toml"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dst + "/essay/target/goal.txt"))
+    }
+
+    func testStopDuringTheScanWritesNothingAndArchivesNothing() throws {
+        for i in 0..<50 { write("d\(i)/f.txt", "x") }
+        _ = try backup()
+        let e = Engine(source: src, destination: dst, options: Options())
+        e.stop()   // stopped before the scan begins: the scan ends at once
+        let r = try e.run()
+        XCTAssertTrue(r.stopped)
+        XCTAssertEqual(r.retired, 0, "a cut-short scan must not make the rest look deleted")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dst + "/d49/f.txt"))
+    }
+
     func testLanesFollowTheMeasurements() {
         XCTAssertEqual(Lanes.choose(source: .ssd, destination: .ssd), Lanes(small: 8, big: 2, together: true, diskOrder: false))
         XCTAssertEqual(Lanes.choose(source: .spinning, destination: .ssd), Lanes(small: 1, big: 1, together: false, diskOrder: true))
