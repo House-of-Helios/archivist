@@ -1,0 +1,2 @@
+texgyrebonum-*.otf — TeX Gyre Bonum, GUST Font License (free to use and redistribute).
+RobotoMono.ttf — Roboto Mono, Apache License 2.0 (Google).

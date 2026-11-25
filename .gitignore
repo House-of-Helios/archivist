@@ -1,0 +1,20 @@
+.DS_Store
+.build/
+*.xcodeproj
+DerivedData/
+build/
+*.env
+.env*
+xcuserdata/
+# Bench test data and disk images: big, rebuilt on demand.
+_devdata/
+# Downloads of other tools: not ours to redistribute.
+_Research/*/dl/
+Icon?
+_devdata.bench.log
+Archivist.xcodeproj/
+# Fake files for safe test backups (bench/make-sample.py)
+Sample Data/
+# Speed-test results: named after the machine that ran them
+bench/results/
+dist/
