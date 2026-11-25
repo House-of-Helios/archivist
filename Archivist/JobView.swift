@@ -64,11 +64,16 @@ struct JobView: View {
         .task(id: watchKey) {
             // Recheck when anything changes on either side (macOS file events; a network share
             // may not send them, so coming back to the app rechecks too).
-            for await _ in FolderWatch.changes(of: watchPaths) where !runner.running { await refresh() }
+            // Each recheck walks every source (a million files is a minute of full CPU), and a busy
+            // folder changes all the time: so at most one recheck per 2 minutes, and none while
+            // Archivist is in the background (coming back to it rechecks).
+            for await _ in FolderWatch.changes(of: watchPaths) where !runner.running {
+                guard NSApp.isActive, Date().timeIntervalSince(JobView.lastCheck) > 120 else { continue }
+                await refresh()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            store.reload()   // the background helper may have run something
-            guard !runner.running else { return }
+            guard !runner.running, Date().timeIntervalSince(JobView.lastCheck) > 120 else { return }
             Task { await refresh() }
         }
     }
@@ -84,8 +89,12 @@ struct JobView: View {
     }
     private var watchKey: String { watchPaths.joined(separator: "|") }
 
+    /// When the sources were last walked: rechecks from file events and returning to the app wait 2 minutes.
+    @MainActor static var lastCheck = Date.distantPast
+
     func refresh() async {
         guard !preset else { return }
+        JobView.lastCheck = Date()
         let j = job
         var paths = j.sources.map(\.readPath)
         if let d = j.destination { paths.append(d) }
@@ -122,13 +131,13 @@ struct JobView: View {
         // Sizes first (local, quick): the bar and rows are right at once; then the comparison
         // with the destination, which can be slow on a busy or spinning drive.
         for s in j.sources where store.surveys[s.id] == nil {
-            if let size = await Task.detached(operation: { try? Survey.size(of: s.readPath, excluded: Set(s.leftOut), patterns: s.namesLeftOut) }).value {
+            if let size = await Task.detached(priority: .utility, operation: { try? Survey.size(of: s.readPath, excluded: Set(s.leftOut), patterns: s.namesLeftOut) }).value {
                 store.surveys[s.id] = size
             }
         }
         for s in j.sources {
             let target = j.target(for: s) ?? "/nonexistent-archivist-destination"
-            if let full = await Task.detached(operation: { try? Survey.of(source: s.readPath, destination: target, excluded: Set(s.leftOut), patterns: s.namesLeftOut) }).value {
+            if let full = await Task.detached(priority: .utility, operation: { try? Survey.of(source: s.readPath, destination: target, excluded: Set(s.leftOut), patterns: s.namesLeftOut) }).value {
                 store.surveys[s.id] = full
             }
         }
@@ -278,21 +287,20 @@ struct SourceRow: View {
                 Text(status).font(Typeface.text(12.5)).foregroundStyle(statusColor).lineLimit(1)
             }
             Spacer(minLength: 8)
-            // Three choices, one shown. Exclude keeps junk skipped too; Copy everything clears both.
+            // Three choices, one shown: Include (everything), Exclude (folders, and junk), Skip junk.
             let mode = !s.leftOut.isEmpty ? 1 : s.skipJunk ? 0 : 2
             Menu {
-                Button { view.update(s) { $0.skipJunk = true; $0.leftOut = [] } } label: {
-                    Text("Skip junk files") + Text(mode == 0 ? "  ✓" : "")
+                Button { view.update(s) { $0.skipJunk = false; $0.leftOut = [] } } label: {
+                    Text("Include") + Text(mode == 2 ? "  ✓" : "")
                 }
                 Button { view.exclude(in: s) } label: {
-                    Text("Exclude folders…") + Text(mode == 1 ? "  ✓" : "")
+                    Text("Exclude…") + Text(mode == 1 ? "  ✓" : "")
                 }
-                Button { view.update(s) { $0.skipJunk = false; $0.leftOut = [] } } label: {
-                    Text("Copy everything") + Text(mode == 2 ? "  ✓" : "")
+                Button { view.update(s) { $0.skipJunk = true; $0.leftOut = [] } } label: {
+                    Text("Skip junk") + Text(mode == 0 ? "  ✓" : "")
                 }
             } label: {
-                Text(mode == 1 ? "Excluding \(s.leftOut.count) \(s.leftOut.count == 1 ? "folder" : "folders")"
-                     : mode == 0 ? "Skip junk files" : "Copy everything").font(Typeface.text(12.5))
+                Text(mode == 1 ? "Exclude (\(s.leftOut.count))" : mode == 0 ? "Skip junk" : "Include").font(Typeface.text(12.5))
             }
             .menuStyle(.borderlessButton).fixedSize()
             .tint(Palette.soft)
@@ -415,7 +423,7 @@ struct DestinationPane: View {
                 Button { NotificationCenter.default.post(name: .showSettings, object: nil) } label: {
                     HStack(spacing: 5) {
                         Emoji(name: "spiral_calendar", size: 13)
-                        Text(job.schedule == .byHand ? "Schedule: —" : job.schedule.words)
+                        Text("Schedule: " + job.schedule.short)
                             .font(Typeface.text(12)).foregroundStyle(Palette.soft).lineLimit(1)
                     }
                 }

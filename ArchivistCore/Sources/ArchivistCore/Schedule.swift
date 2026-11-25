@@ -52,4 +52,15 @@ public enum Schedule: Codable, Hashable, Sendable {
             return "Once a week on \(names[(d - 1 + 7) % 7]) at " + time(h, m)
         }
     }
+
+    /// The short form for the window: "Daily at 14:00", "Weekly, Monday at 14:00", "—".
+    public var short: String {
+        switch self {
+        case .byHand: return "—"
+        case .whenConnected: return "When connected"
+        case let .hourly(m): return String(format: "Hourly at :%02d", m)
+        case .daily: return words.replacingOccurrences(of: "Once a day", with: "Daily")
+        case .weekly: return words.replacingOccurrences(of: "Once a week on ", with: "Weekly, ")
+        }
+    }
 }

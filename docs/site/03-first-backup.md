@@ -10,9 +10,9 @@ Drop folders, or a whole drive, on the left side, or click the dashed box and ch
 
 On the right of each source, a menu chooses what to copy:
 
-- **Skip junk files** (the default): leave out caches, temp files, and build folders that rebuild from the code beside them, such as `node_modules`, or `target` next to a `Cargo.toml`.
-- **Exclude folders…**: choose folders inside the source to leave out, such as a Dropbox folder. Junk files are skipped too.
-- **Copy everything**: copy every file in the folder. This also clears any excluded folders.
+- **Include**: copy every file in the folder.
+- **Exclude…**: choose folders inside the source to leave out, such as a Dropbox folder. Junk files are left out too.
+- **Skip junk** (the default): leave out caches, temp files, and build folders that rebuild from the code beside them, such as `node_modules`, or `target` next to a `Cargo.toml`.
 
 The **ⓧ** removes the source from the backup. Nothing at the destination is touched by that.
 
