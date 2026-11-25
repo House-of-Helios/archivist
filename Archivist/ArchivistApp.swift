@@ -209,7 +209,8 @@ struct UpdatePill: View {
     private var current: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0" }
 
     var body: some View {
-        Group {
+        ZStack {   // a real view even with nothing to show: an empty Group never runs its .task
+            Color.clear.frame(width: 0, height: 0)
             if updater.installing != nil {
                 HStack(spacing: 8) {
                     ProgressView(value: updater.progress).progressViewStyle(.circular).controlSize(.small).tint(Self.green)
@@ -242,8 +243,15 @@ struct UpdatePill: View {
                 guard case .offline = status else { break }
                 try? await Task.sleep(nanoseconds: 20_000_000_000)
             }
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 3_600_000_000_000)
+            while !Task.isCancelled {   // then every 15 minutes
+                try? await Task.sleep(nanoseconds: 900_000_000_000)
+                let status = await Updater.check(current: current)
+                if let u = status.update { update = u; updater.prepare(u) }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            guard !preset else { return }
+            Task {   // coming back to the app asks again
                 let status = await Updater.check(current: current)
                 if let u = status.update { update = u; updater.prepare(u) }
             }

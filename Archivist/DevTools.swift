@@ -144,6 +144,14 @@ enum DevControl {
             guard let j = job(cmd) else { return ["ok": false, "error": "no such job"] }
             store.remove(j.id)
             return ["ok": true]
+        case "update":   // press "Install & restart" on whatever GitHub offers
+            Task { @MainActor in
+                let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+                let status = await Updater.check(current: v)
+                DevLog.write("update test: \(status)")
+                if let u = status.update { Updater.shared.install(u) }
+            }
+            return ["ok": true]
         default:
             return ["ok": false, "error": "unknown cmd"]
         }
