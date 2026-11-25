@@ -74,6 +74,7 @@ struct Job: Codable, Identifiable, Hashable {
     var keepDeleted = true                           // earlier versions (Settings)
     var keepChanged = true
     var keepDays: Int? = 365                         // nil = keep by age forever
+    var threads: Int?                                // copies at once; nil = Automatic (by the drives)
     var makeRoom = true                              // drive running low: oldest earlier versions go first
     /// One place for this backup's earlier versions.
     var pastRoot: String? { destination.map { $0 + "/" + Names.past } }
@@ -143,6 +144,7 @@ struct Job: Codable, Identifiable, Hashable {
         keepChanged = try c.decodeIfPresent(Bool.self, forKey: .keepChanged) ?? true
         keepDays = c.contains(.keepDays) ? try c.decodeIfPresent(Int.self, forKey: .keepDays) : 365
         makeRoom = try c.decodeIfPresent(Bool.self, forKey: .makeRoom) ?? true
+        threads = try c.decodeIfPresent(Int.self, forKey: .threads)
         lastRun = try c.decodeIfPresent(Date.self, forKey: .lastRun)
         destinationSince = try c.decodeIfPresent(Date.self, forKey: .destinationSince)
         // Backups saved before icons: a steady pick from the id, so it never changes between launches.
@@ -395,6 +397,7 @@ final class Runner {
                 opts.excluded = job.excluded(in: source)
                 opts.patterns = source.namesLeftOut
                 opts.destinationKind = job.destinationKind
+                opts.threads = job.threads
                 opts.finalFlush = i == runs.count - 1   // one full flush per backup, at its end
                 opts.keepDeleted = job.keepDeleted
                 opts.keepChanged = job.keepChanged

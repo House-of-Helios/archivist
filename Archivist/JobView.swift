@@ -48,7 +48,7 @@ struct JobView: View {
                             .contentShape(Rectangle())
                             .onTapGesture { showingSettings = false }   // a click outside closes it
                         SettingsSheet(view: self, close: { showingSettings = false })
-                            .frame(width: 480, height: min(640, g.size.height - 32))   // never hangs past the window
+                            .frame(width: min(760, g.size.width - 32), height: min(700, g.size.height - 32))   // never hangs past the window
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                             .shadow(color: .black.opacity(0.25), radius: 20, y: 6)
                     }
@@ -601,16 +601,19 @@ struct BottomBar: View {
                     .clipped()
                     ZStack {
                     if r.running, !r.finishing, let pace = r.pace {
-                        HStack {
+                        let (icon, word) = pace >= 0.7 ? ("rocket", "Fast") : pace >= 0.4 ? ("horse", "Good")
+                                         : pace >= 0.15 ? ("turtle", "Slow") : ("snail", "Very slow")
+                        HStack(spacing: 8) {
                             ZStack(alignment: .leading) {   // now, against the best this drive has done
                                 Capsule().fill(Palette.rule)
-                                Capsule().fill(Nippon.color(job.color)).frame(width: 70 * pace)
+                                Capsule().fill(Palette.accent).frame(width: 70 * pace)
                             }
                             .frame(width: 70, height: 5)
                             .animation(.easeInOut(duration: 1), value: pace)
+                            Text("Drive speed").font(Typeface.text(12)).foregroundStyle(Palette.soft)
                             Spacer()
-                            Text(pace >= 0.7 ? "Fast" : pace >= 0.4 ? "Good" : pace >= 0.15 ? "Slow" : "Very slow")
-                                .font(Typeface.text(12)).foregroundStyle(pace >= 0.4 ? Palette.soft : Palette.warn)
+                            Emoji(name: icon, size: 14)
+                            Text(word).font(Typeface.text(12)).foregroundStyle(pace >= 0.4 ? Palette.soft : Palette.warn)
                         }
                     }
                     Text(r.stopping ? "Stopping…" : r.finishing ? "Finishing…"
@@ -743,60 +746,80 @@ struct SettingsSheet: View {
     var body: some View {
         let job = view.job
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 22) {
                 HStack(spacing: 14) {
                     Badge(icon: job.icon, hex: job.color, size: 56)
                     TextField("Name this backup", text: $name)
                         .textFieldStyle(.plain).font(Typeface.title(24)).foregroundStyle(Palette.ink)
                         .onSubmit(saveName)
+                    Button { saveName(); close() } label: { Image(systemName: "xmark").font(.system(size: 13, weight: .semibold)) }
+                        .buttonStyle(.plain).foregroundStyle(Palette.soft).help("Close")
                 }
 
-                section("Picture") {
-                    LazyVGrid(columns: Array(repeating: GridItem(.fixed(34), spacing: 6), count: 9), spacing: 6) {
-                        ForEach(Job.icons, id: \.self) { n in
-                            Button { view.edit { $0.icon = n; $0.lookChosen = true } } label: {
-                                Emoji(name: n, size: 22).frame(width: 34, height: 34)
-                                    .background(Circle().strokeBorder(n == job.icon ? Palette.ink : .clear, lineWidth: 2))
-                            }.buttonStyle(.plain)
+                HStack(alignment: .top, spacing: 28) {
+                    section("Picture") {
+                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(34), spacing: 4), count: 8), spacing: 4) {
+                            ForEach(Job.icons, id: \.self) { n in
+                                Button { view.edit { $0.icon = n; $0.lookChosen = true } } label: {
+                                    Emoji(name: n, size: 22).frame(width: 34, height: 34)
+                                        .background(Circle().strokeBorder(n == job.icon ? Palette.ink : .clear, lineWidth: 2))
+                                }.buttonStyle(.plain)
+                            }
                         }
                     }
-                }
-                section("Colour") {
-                    LazyVGrid(columns: Array(repeating: GridItem(.fixed(26), spacing: 8), count: 12), spacing: 8) {
-                        ForEach(Nippon.colors, id: \.hex) { c in
-                            Button { view.edit { $0.color = c.hex; $0.lookChosen = true } } label: {
-                                Circle().fill(Nippon.color(c.hex)).frame(width: 26, height: 26)
-                                    .overlay(Circle().strokeBorder(c.hex == job.color ? Palette.ink : .clear, lineWidth: 2.5).padding(-3))
-                            }.buttonStyle(.plain).help(c.name)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    section("Colour") {
+                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(26), spacing: 10), count: 8), spacing: 10) {
+                            ForEach(Nippon.colors, id: \.hex) { c in
+                                Button { view.edit { $0.color = c.hex; $0.lookChosen = true } } label: {
+                                    Circle().fill(Nippon.color(c.hex)).frame(width: 26, height: 26)
+                                        .overlay(Circle().strokeBorder(c.hex == job.color ? Palette.ink : .clear, lineWidth: 2.5).padding(-3))
+                                }.buttonStyle(.plain).help(c.name)
+                            }
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                section("Schedule") { ScheduleChooser(view: view) }
-
-                section("Earlier versions") {
-                    Toggle("Keep deleted files", isOn: Binding(get: { job.keepDeleted }, set: { v in view.edit { $0.keepDeleted = v } }))
-                    Toggle("Keep earlier versions of changed files", isOn: Binding(get: { job.keepChanged }, set: { v in view.edit { $0.keepChanged = v } }))
-                    HStack(spacing: 8) {
-                        Text("Remove after").foregroundStyle(Palette.soft)
-                        Picker("", selection: Binding(get: { job.keepDays ?? 0 }, set: { v in view.edit { $0.keepDays = v == 0 ? nil : v } })) {
-                            Text("30 days").tag(30); Text("90 days").tag(90); Text("1 year").tag(365); Text("Never").tag(0)
-                        }.labelsHidden().fixedSize()
+                HStack(alignment: .top, spacing: 28) {
+                    VStack(alignment: .leading, spacing: 22) {
+                        section("Schedule") { ScheduleChooser(view: view) }
+                        section("Threads") {
+                            Picker("", selection: Binding(get: { job.threads ?? 0 }, set: { v in view.edit { $0.threads = v == 0 ? nil : v } })) {
+                                Text("Automatic").tag(0)
+                                ForEach([1, 2, 4, 8, 16], id: \.self) { Text("\($0)").tag($0) }
+                            }
+                            .labelsHidden().fixedSize()
+                        }
                     }
-                    Toggle("Make room when the drive is nearly full (oldest first)", isOn: Binding(get: { job.makeRoom }, set: { v in view.edit { $0.makeRoom = v } }))
-                }
-
-                section("Destination drive type") {
-                    Picker("", selection: Binding(get: { job.destinationKind?.rawValue ?? "auto" },
-                                                  set: { v in view.edit { $0.destinationKind = DriveKind(rawValue: v) } })) {
-                        Text("Automatic" + (view.detectedKind(job.destination).map { ": \(words($0))" } ?? "")).tag("auto")
-                        Text("Solid state (SSD)").tag(DriveKind.ssd.rawValue)
-                        Text("Spinning disk").tag(DriveKind.spinning.rawValue)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 22) {
+                        section("Earlier versions") {
+                            Toggle("Keep deleted files", isOn: Binding(get: { job.keepDeleted }, set: { v in view.edit { $0.keepDeleted = v } }))
+                            Toggle("Keep earlier versions of changed files", isOn: Binding(get: { job.keepChanged }, set: { v in view.edit { $0.keepChanged = v } }))
+                            HStack(spacing: 8) {
+                                Text("Remove after").foregroundStyle(Palette.soft)
+                                Picker("", selection: Binding(get: { job.keepDays ?? 0 }, set: { v in view.edit { $0.keepDays = v == 0 ? nil : v } })) {
+                                    Text("30 days").tag(30); Text("90 days").tag(90); Text("1 year").tag(365); Text("Never").tag(0)
+                                }.labelsHidden().fixedSize()
+                            }
+                            Toggle("Make room when the drive is nearly full (oldest first)", isOn: Binding(get: { job.makeRoom }, set: { v in view.edit { $0.makeRoom = v } }))
+                        }
+                        section("Destination drive type") {
+                            Picker("", selection: Binding(get: { job.destinationKind?.rawValue ?? "auto" },
+                                                          set: { v in view.edit { $0.destinationKind = DriveKind(rawValue: v) } })) {
+                                Text("Automatic" + (view.detectedKind(job.destination).map { ": \(words($0))" } ?? "")).tag("auto")
+                                Text("Solid state (SSD)").tag(DriveKind.ssd.rawValue)
+                                Text("Spinning disk").tag(DriveKind.spinning.rawValue)
+                            }
+                            .pickerStyle(.radioGroup).labelsHidden()
+                        }
                     }
-                    .pickerStyle(.radioGroup).labelsHidden()
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                section("Appearance") {
+                VStack(spacing: 8) {
+                    Text("Appearance").font(Typeface.text(13, .semibold)).foregroundStyle(Palette.soft)
                     Picker("", selection: $appearance) {
                         Text("Follow the Mac").tag("system")
                         Text("Light").tag("light")
@@ -804,13 +827,14 @@ struct SettingsSheet: View {
                     }
                     .pickerStyle(.segmented).labelsHidden().fixedSize()   // fixed: a hidden label's room shifted it per selection
                 }
+                .frame(maxWidth: .infinity)
 
                 Divider()
                 HStack {
                     Button("Delete this backup…", role: .destructive) { confirmDelete = true }
                         .foregroundStyle(Palette.warn)
                     Spacer()
-                    Button("Done") { saveName(); close() }.keyboardShortcut(.defaultAction)
+                    Button("Save") { saveName(); close() }.keyboardShortcut(.defaultAction)
                 }
             }
             .padding(26)

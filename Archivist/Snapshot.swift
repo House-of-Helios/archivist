@@ -66,7 +66,7 @@ enum Snapshot {
             ("update", window(studio, Runner(), surveys, drives, space: true, update: update)),
         ]
         let sheets: [(String, AnyView, CGSize)] = [
-            ("settings", AnyView(SettingsSheet(view: JobView(storeOverride: store, jobID: studio.id, runnerOverride: Runner(), destinationState: .present, drives: drives, presetSurveys: surveys, space: nil, preset: true))), CGSize(width: 520, height: 780)),
+            ("settings", AnyView(SettingsSheet(view: JobView(storeOverride: store, jobID: studio.id, runnerOverride: Runner(), destinationState: .present, drives: drives, presetSurveys: surveys, space: nil, preset: true))), CGSize(width: 760, height: 700)),
             ("update-sheet", AnyView(UpdateSheet(update: update, current: "0.0.1", onLater: {}, onInstall: {})), CGSize(width: 480, height: 420)),
         ]
         for (name, dark) in [("dark", true), ("light", false)] {

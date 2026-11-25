@@ -62,6 +62,7 @@ enum Scheduler {
                 o.excluded = job.excluded(in: s)
                 o.patterns = s.namesLeftOut
                 o.destinationKind = job.destinationKind
+                o.threads = job.threads
                 o.finalFlush = i == live.count - 1
                 o.keepDeleted = job.keepDeleted; o.keepChanged = job.keepChanged
                 o.pastRoot = job.pastRoot; o.pastSubfolder = s.name; o.stamp = stamp

@@ -8,6 +8,7 @@ struct ArchivistApp: App {
     @State private var store = AppDelegate.store
 
     init() {
+        AppDelegate.neverRestoreWindows()
         #if DEBUG
         if let dir = Snapshot.requestedDirectory { Snapshot.render(to: dir); exit(0) }
         #endif
@@ -22,10 +23,11 @@ struct ArchivistApp: App {
             RootView()
                 .environment(store)
                 .modifier(AppearanceChoice())
-                .frame(minWidth: 780, maxWidth: 960, minHeight: 440)   // wider adds nothing; taller shows more sources
+                .frame(width: 860).frame(minHeight: 440)   // width fixed: wider adds nothing; taller shows more sources
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 860, height: 580)
+        .windowResizability(.contentSize)   // the window takes the content's limits: only taller or shorter
     }
 }
 
@@ -42,9 +44,14 @@ struct RootView: View {
                 JobView(jobID: id).id(id)
             } else {
                 Color.clear
+                    .onAppear { selection = store.jobs.first?.id }   // a deleted tab: the first one left opens
             }
         }
         .background(Palette.ground.ignoresSafeArea())   // paper to every edge: no strip at the smallest size
+        .onChange(of: store.jobs.map(\.id)) { _, ids in
+            if let id = selection, ids.contains(id) { return }
+            selection = ids.first ?? store.add().id   // never a blank window: the first tab left, or a new one
+        }
         .ignoresSafeArea(.container, edges: .top)   // the strip makes room for the traffic lights itself; a changing inset jumped the layout
         .tint(Palette.accent)
         .task {   // scheduled backups, while Archivist is open
@@ -73,47 +80,91 @@ struct TitleStrip: View {
     @Binding var selection: Job.ID?
     var drawn = false   // snapshots: no traffic lights to clear
     var previewUpdate: UpdateInfo? = nil   // snapshots: show the pill
+    @State private var firstShown: Job.ID?
+    private static let roomy = 5   // more backups than this: the others shrink to their picture, arrows appear
 
     var body: some View {
-        HStack(spacing: 6) {
-            ForEach(store.jobs) { job in
-                let on = job.id == selection
-                HStack(spacing: 8) {
-                    Badge(icon: job.icon, hex: job.color, size: 26)
-                    Text(job.title.isEmpty ? "Untitled" : job.title)
-                        .font(Typeface.title(16))
-                        .offset(y: -1.5)   // Bonum's letters sit low in their line: centre them on the picture
-                        .foregroundStyle(on ? Palette.ink : Palette.soft)
-                        .fontWeight(.regular)
-                    if store.runners[job.id]?.running == true {
-                        Circle().fill(Palette.accent).frame(width: 7, height: 7).help("Backing up")
-                    }
+        let many = store.jobs.count > Self.roomy
+        HStack(alignment: .bottom, spacing: 6) {
+            if many { arrow("chevron.left", by: -1) }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .bottom, spacing: 4) {
+                    ForEach(store.jobs) { job in tab(job, compact: many && job.id != selection).id(job.id) }
                 }
-                .padding(.leading, 4).padding(.trailing, 12).padding(.vertical, 4)
-                .background(Capsule().fill(on ? Palette.accent.opacity(0.32) : .clear))   // fill only: an outline left stray lines at the ends
-                .contentShape(Capsule())
-                .onTapGesture { selection = job.id }
-                .contextMenu {
-                    Button("Remove backup", role: .destructive) {
-                        store.remove(job.id)
-                        if selection == job.id { selection = store.jobs.first?.id }
-                    }
-                }
+                .scrollTargetLayout()
             }
+            .scrollPosition(id: $firstShown, anchor: .leading)
+            .fixedSize(horizontal: !many, vertical: false)
+            if many { arrow("chevron.right", by: 1) }
             Button { selection = store.add().id } label: { Image(systemName: "plus").font(.system(size: 13, weight: .semibold)) }
-                .buttonStyle(.plain).foregroundStyle(Palette.soft).padding(8)
+                .buttonStyle(.plain).foregroundStyle(Palette.soft).padding(8).padding(.bottom, 2)
                 .help("New backup")
-            Spacer()
-            UpdatePill(preset: previewUpdate)
-            AppearanceSwitch()
+            Spacer(minLength: 8)
+            HStack(spacing: 0) {
+                UpdatePill(preset: previewUpdate)
+                AppearanceSwitch()
+            }
+            .padding(.bottom, 8)
         }
-        .padding(.leading, 24)                // the pills' inner padding puts their pictures on Sources' 28 pt edge
+        .padding(.leading, 24)
         .padding(.trailing, 16)
         .padding(.top, drawn ? 0 : 28)        // under the window's traffic lights, so the left edge can line up
-        .padding(.bottom, 9)
         .frame(height: drawn ? 52 : 80, alignment: .bottom)
         .fixedSize(horizontal: false, vertical: true)
-        .overlay(alignment: .bottom) { Rectangle().fill(Palette.rule).frame(height: 1) }
+        .background(alignment: .bottom) { Rectangle().fill(Palette.rule).frame(height: 1) }   // under the tabs: the open one covers it
+    }
+
+    /// A folder tab: rounded on top, square at the bottom, standing on the hairline. The open one is
+    /// the colour of its picture's circle, outlined up its sides and over its top, and covers the
+    /// hairline under it, so it runs into the page.
+    private func tab(_ job: Job, compact: Bool) -> some View {
+        let on = job.id == selection
+        let shape = UnevenRoundedRectangle(topLeadingRadius: 10, bottomLeadingRadius: 0, bottomTrailingRadius: 0, topTrailingRadius: 10)
+        let running = store.runners[job.id]?.running == true
+        return HStack(spacing: 8) {
+            Badge(icon: job.icon, hex: job.color, size: 26)
+                .overlay {   // a running backup: a ring round its picture fills as it copies
+                    if running, let r = store.runners[job.id] {
+                        Circle().trim(from: 0, to: max(0.03, r.fraction(at: .now)))
+                            .stroke(Palette.accent, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                            .rotationEffect(.degrees(-90)).padding(-3)
+                    }
+                }
+                .help(running ? "Backing up" : "")
+            if !compact {
+                Text(job.title.isEmpty ? "Untitled" : job.title)
+                    .font(Typeface.title(16))
+                    .offset(y: -1.5)   // Bonum's letters sit low in their line: centre them on the picture
+                    .foregroundStyle(on ? Palette.ink : Palette.soft)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+        }
+        .padding(.leading, 8).padding(.trailing, compact ? 8 : 14).padding(.top, 6).padding(.bottom, 7)
+        .background(shape.fill(on ? Nippon.soft(job.color) : Nippon.soft(job.color).opacity(0.35)))
+        .overlay(shape.stroke(on ? Palette.rule : .clear, lineWidth: 1))
+        .overlay(alignment: .bottom) {   // the open tab has no line under it
+            if on { Rectangle().fill(Nippon.soft(job.color)).frame(height: 2).padding(.horizontal, 1).offset(y: 1) }
+        }
+        .zIndex(on ? 1 : 0)
+        .contentShape(shape)
+        .onTapGesture { selection = job.id }
+        .help(compact ? job.title : "")
+        .contextMenu {
+            Button("Remove backup", role: .destructive) {
+                store.remove(job.id)
+                if selection == job.id { selection = store.jobs.first?.id }
+            }
+        }
+    }
+
+    private func arrow(_ symbol: String, by step: Int) -> some View {
+        Button {
+            let ids = store.jobs.map(\.id)
+            let i = firstShown.flatMap { ids.firstIndex(of: $0) } ?? 0
+            withAnimation(.easeOut(duration: 0.2)) { firstShown = ids[max(0, min(ids.count - 1, i + step))] }
+        } label: { Image(systemName: symbol).font(.system(size: 12, weight: .semibold)) }
+            .buttonStyle(.plain).foregroundStyle(Palette.soft).padding(.horizontal, 4).padding(.bottom, 12)
     }
 }
 
@@ -144,6 +195,13 @@ struct QuietButton: ButtonStyle {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static let store = JobStore()
 
+    /// The window always opens at launch. The app stays running when its window closes (schedules
+    /// need it), so macOS would otherwise remember "no windows" and start with nothing on screen.
+    static func neverRestoreWindows() {
+        UserDefaults.standard.set(true, forKey: "ApplePersistenceIgnoreState")   // read by AppKit before the first window
+        UserDefaults.standard.set(false, forKey: "NSQuitAlwaysKeepsWindows")
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let store = Self.store
         guard store.anyRunning else { return .terminateNow }
@@ -169,7 +227,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !Self.store.anyRunning }
+    /// Closing the window keeps Archivist running: scheduled backups need it open (no background helper).
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
 /// A two-way switch: a circle sliding in a pill, sun on the left, moon on the right. It shows

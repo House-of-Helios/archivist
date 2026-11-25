@@ -42,6 +42,7 @@ public struct Options: Sendable {
     /// on a spinning or SMR drive each full flush empties the drive's whole cache. Earlier
     /// sources are still ordered by their write barriers (no half files after a crash).
     public var finalFlush = true
+    public var threads: Int?                 // the person's own number of copies at once; nil = chosen by the drives
     /// A write barrier per batch of 64 files. Off: on a spinning disk each one is a journal flush
     /// and head moves (HFS+ image: 1.95 s vs 1.5 s for 3,000 files; ditto 0.8 s). Crash safety comes
     /// from the run lock instead: a run that died has everything it wrote copied again.
@@ -136,7 +137,11 @@ public final class Engine {
         let dst = try Drive.of(path: FileManager.default.fileExists(atPath: destination) ? destination
                                : (destination as NSString).deletingLastPathComponent, override: options.destinationKind)
         try refuseOverlap()
-        let lanes = options.lanes ?? Lanes.choose(source: src.kind, destination: dst.kind)
+        let lanes = options.lanes ?? {
+            var l = Lanes.choose(source: src.kind, destination: dst.kind)
+            if let n = options.threads, n > 0 { l.small = n; l.big = max(1, min(n, 2)); l.together = n > 1 }
+            return l
+        }()
 
         let stateDir = destination + "/" + Names.state
         // A dry run reads both sides and writes nothing: no state folder, no lock, no cleanup.
