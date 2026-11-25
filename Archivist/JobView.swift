@@ -587,13 +587,17 @@ struct BottomBar: View {
             let estimating = r.running && !r.finishing && r.remaining(at: tl.date) == nil
             GeometryReader { g in
                 let w = g.size.width - Double(3 * max(chunks.count - 1, 0))
+                // Each chunk at least 4 pt, the rest shared by size: the chunks add up to the bar exactly
+                // (a 4 pt floor on top of the shares overflowed the bar and clipped its right end).
+                let floorW = 4.0, spare = max(0, w - floorW * Double(chunks.count))
+                let widths = Dictionary(uniqueKeysWithValues: chunks.map { ($0.s.id, floorW + spare * Double($0.b) / Double(total)) })
                 VStack(alignment: .leading, spacing: 0) {
                     ZStack(alignment: .leading) {
                         if chunks.isEmpty { Rectangle().fill(Palette.rule) }
                         HStack(spacing: 3) {
                             ForEach(chunks, id: \.s.id) { c in
                                 Rectangle().fill(scheme == .dark ? Nippon.color(c.s.color).opacity(0.18) : Nippon.soft(c.s.color, white: 0.25).opacity(0.5))
-                                    .frame(width: max(4, w * Double(c.b) / Double(total)))
+                                    .frame(width: widths[c.s.id] ?? 4)
                             }
                         }
                         if r.running && !estimating {
@@ -601,7 +605,7 @@ struct BottomBar: View {
                                 ForEach(chunks, id: \.s.id) { c in
                                     // Dark: the soft colours of the circles; full strength glared on a dark track.
                                     Rectangle().fill(scheme == .dark ? Nippon.soft(c.s.color, white: 0.3) : Nippon.color(c.s.color))
-                                        .frame(width: max(4, w * Double(c.b) / Double(total)))
+                                        .frame(width: widths[c.s.id] ?? 4)
                                 }
                             }
                             .mask(alignment: .leading) {
@@ -616,7 +620,7 @@ struct BottomBar: View {
                                 ForEach(chunks, id: \.s.id) { c in
                                     Rectangle().fill(scheme == .light ? Nippon.color(c.s.color).opacity(0.35 + 0.45 * breath)
                                                                       : Nippon.soft(c.s.color, white: 0.3).opacity(0.25 + 0.3 * breath))
-                                        .frame(width: max(4, w * Double(c.b) / Double(total)))
+                                        .frame(width: widths[c.s.id] ?? 4)
                                 }
                             }
                             .animation(.easeInOut(duration: 0.5), value: breath)
@@ -829,13 +833,19 @@ struct SettingsSheet: View {
                             Toggle("Keep earlier versions", isOn: Binding(get: { job.keepChanged }, set: { v in view.edit { $0.keepChanged = v } }))
                             HStack(spacing: 8) {
                                 Text("Remove after").foregroundStyle(Palette.soft)
-                                Picker("", selection: Binding(get: { job.keepDays ?? 0 }, set: { v in view.edit { $0.keepDays = v == 0 ? nil : v } })) {
-                                    Text("30 days").tag(30); Text("90 days").tag(90); Text("1 year").tag(365); Text("Never").tag(0)
-                                }.labelsHidden().fixedSize()
+                                // A plain menu sized to its words (the system picker kept room for the widest).
+                                Menu {
+                                    ForEach([(30, "30 days"), (90, "90 days"), (365, "1 year"), (0, "Never")], id: \.0) { days, words in
+                                        Button(words) { view.edit { $0.keepDays = days == 0 ? nil : days } }
+                                    }
+                                } label: {
+                                    Text([30: "30 days", 90: "90 days", 365: "1 year"][job.keepDays ?? 0] ?? "Never")
+                                }
+                                .menuStyle(.button).fixedSize()
                             }
                             Toggle(isOn: Binding(get: { job.makeRoom }, set: { v in view.edit { $0.makeRoom = v } })) {
                                 VStack(alignment: .leading, spacing: 1) {
-                                    Text("Make room when drive is full")
+                                    Text("Make room when\ndrive is full")
                                     Text("Oldest first").font(Typeface.text(11.5)).foregroundStyle(Palette.soft)
                                 }
                             }

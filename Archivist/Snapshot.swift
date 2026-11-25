@@ -66,7 +66,7 @@ enum Snapshot {
             ("update", window(studio, Runner(), surveys, drives, space: true, update: update)),
         ]
         let sheets: [(String, AnyView, CGSize)] = [
-            ("settings", AnyView(SettingsSheet(view: JobView(storeOverride: store, jobID: studio.id, runnerOverride: Runner(), destinationState: .present, drives: drives, presetSurveys: surveys, space: nil, preset: true))), CGSize(width: 560, height: 760)),
+            ("settings", AnyView(SettingsSheet(view: JobView(storeOverride: store, jobID: studio.id, runnerOverride: Runner(), destinationState: .present, drives: drives, presetSurveys: surveys, space: nil, preset: true))), CGSize(width: 0, height: 760)),
             ("update-sheet", AnyView(UpdateSheet(update: update, current: "0.0.1", onLater: {}, onInstall: {})), CGSize(width: 480, height: 420)),
         ]
         for (name, dark) in [("dark", true), ("light", false)] {
@@ -87,6 +87,11 @@ enum Snapshot {
     }
 
     static func save(_ view: AnyView, size: CGSize, dark: Bool, to path: String, store: JobStore) {
+        var size = size
+        if size.width == 0 {   // its own width, as the window shows it
+            let probe = NSHostingView(rootView: view.environment(store).fixedSize(horizontal: true, vertical: false).frame(height: size.height))
+            size.width = ceil(probe.fittingSize.width)
+        }
         let content = view.environment(store).frame(width: size.width, height: size.height)
             .environment(\.colorScheme, dark ? .dark : .light)
         let host = NSHostingView(rootView: content)

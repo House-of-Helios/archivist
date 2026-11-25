@@ -26,7 +26,7 @@ struct ArchivistApp: App {
                 .frame(width: 860).frame(minHeight: 417)   // width fixed; smallest holds exactly four source rows (measured: the window adds 32 for its title bar)
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 860, height: 580)
+        .defaultSize(width: 860, height: 417)   // opens at the smallest size: four sources; a dragged height is kept (frame autosave)
         .windowResizability(.contentSize)   // the window takes the content's limits: only taller or shorter
     }
 }
@@ -64,7 +64,10 @@ struct RootView: View {
             if store.jobs.isEmpty { store.add() }
             selection = selection ?? store.jobs.first?.id
             DevLog.write("app open: \(store.jobs.count) backups")
-            for w in NSApp.windows { w.backgroundColor = NSColor(Palette.ground) }   // the window's own fill, under everything
+            for w in NSApp.windows where w.contentView != nil {
+                w.backgroundColor = NSColor(Palette.ground)   // the window's own fill, under everything
+                w.setFrameAutosaveName("Archivist main window")   // the height someone drags to is kept across launches
+            }
             Scheduler.sync(store.jobs)   // removes the retired background helper if an older build left one
             #if DEBUG
             DevControl.start(store) { selection = $0 }
