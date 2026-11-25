@@ -61,6 +61,19 @@ struct JobView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showSettings)) { _ in showingSettings = true }
         .onExitCommand { showingSettings = false }
         .task(id: refreshKey) { await refresh() }
+        .task(id: job.destination) {
+            // The destination's presence is checked every 3 s on its own: one look, no walk, so a
+            // renamed folder or an unplugged drive shows within seconds (not at the next measuring).
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard !preset, let d = job.destination, !runner.running else { continue }
+                let now = await JobView.where_(d)
+                if now != destinationState {
+                    destinationState = now
+                    if now == .present { await refresh() }   // back again: measure what is there
+                }
+            }
+        }
         .task(id: watchKey) {
             // Recheck when anything changes on either side (macOS file events; a network share
             // may not send them, so coming back to the app rechecks too).
@@ -89,6 +102,16 @@ struct JobView: View {
     }
     private var watchKey: String { watchPaths.joined(separator: "|") }
 
+    /// Is the destination there, or is its folder or its whole drive gone? One look, no walk.
+    nonisolated static func where_(_ d: String) async -> DestinationState {
+        await Task.detached { () -> DestinationState in
+            if FileManager.default.fileExists(atPath: d) { return .present }
+            let comps = (d as NSString).pathComponents
+            if comps.count > 2, comps[1] == "Volumes", !FileManager.default.fileExists(atPath: "/Volumes/" + comps[2]) { return .driveMissing }
+            return .folderMissing
+        }.value
+    }
+
     /// When the sources were last walked: rechecks from file events and returning to the app wait 2 minutes.
     @MainActor static var lastCheck = Date.distantPast
 
@@ -109,14 +132,7 @@ struct JobView: View {
             }.value.map { (free: $0.0, total: $0.1) }
         }
         // Is the destination still there? A deleted folder or an unplugged drive must say so.
-        if let d = j.destination {
-            destinationState = await Task.detached { () -> DestinationState in
-                if FileManager.default.fileExists(atPath: d) { return .present }
-                let comps = (d as NSString).pathComponents
-                if comps.count > 2, comps[1] == "Volumes", !FileManager.default.fileExists(atPath: "/Volumes/" + comps[2]) { return .driveMissing }
-                return .folderMissing
-            }.value
-        }
+        if let d = j.destination { destinationState = await JobView.where_(d) }
         // A run lock whose process is gone (or is this app, not copying now) = a backup that was cut off.
         let me = getpid()
         let busy = runner.running
