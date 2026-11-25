@@ -6,7 +6,7 @@ import Observation
 struct Source: Codable, Identifiable, Hashable {
     var id = UUID()
     var path: String
-    var skip = false                 // "skip next time": kept in the list, not copied
+    var skip = false                 // "Exclude": this row is not copied, and is left out of any Include row that holds it
     var leftOut: [String] = []       // subfolders, relative to this source
     var patterns: [String] = []      // names left out anywhere inside (`*.tmp`); older saves only
     var skipJunk = true              // "Skip junk files" (the default for a new source): Source.junk, anywhere inside
@@ -34,7 +34,7 @@ struct Source: Codable, Identifiable, Hashable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
         path = try c.decode(String.self, forKey: .path)
-        skip = false   // Pause is gone from the app: a source saved paused copies again
+        skip = try c.decodeIfPresent(Bool.self, forKey: .skip) ?? false
         leftOut = try c.decodeIfPresent([String].self, forKey: .leftOut) ?? []
         patterns = try c.decodeIfPresent([String].self, forKey: .patterns) ?? []
         skipJunk = try c.decodeIfPresent(Bool.self, forKey: .skipJunk) ?? false
@@ -114,6 +114,15 @@ struct Job: Codable, Identifiable, Hashable {
 
     /// Each source lands in its own folder at the destination, named after it.
     func target(for s: Source) -> String? { destination.map { $0 + "/" + s.name } }
+
+    /// What a source leaves out: every Exclude row that lies inside it, as a path relative to it.
+    func excluded(in s: Source) -> Set<String> {
+        let root = (s.path as NSString).standardizingPath
+        return Set(s.leftOut + sources.filter { $0.skip && $0.id != s.id }.compactMap { x in
+            let p = (x.path as NSString).standardizingPath
+            return p.hasPrefix(root + "/") ? String(p.dropFirst(root.count + 1)) : nil
+        })
+    }
 
     init(title: String) { self.title = title }
 
@@ -373,7 +382,7 @@ final class Runner {
             for (i, (source, dst)) in runs.enumerated() where !stopped && !self.stopRequested {
                 let src = source.readPath
                 var opts = Options()
-                opts.excluded = Set(source.leftOut)
+                opts.excluded = job.excluded(in: source)
                 opts.patterns = source.namesLeftOut
                 opts.destinationKind = job.destinationKind
                 opts.finalFlush = i == runs.count - 1   // one full flush per backup, at its end

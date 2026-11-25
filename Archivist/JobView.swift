@@ -81,7 +81,7 @@ struct JobView: View {
     // MARK: looking things up
 
     private var refreshKey: String {
-        job.sources.map { "\($0.path)|\($0.leftOut)|\($0.namesLeftOut)" }.joined() + (job.destination ?? "") + (job.lastResult ?? "") + "\(runner.running)"
+        job.sources.map { "\($0.path)|\($0.skip)|\($0.namesLeftOut)" }.joined() + (job.destination ?? "") + (job.lastResult ?? "") + "\(runner.running)"
     }
 
     private var watchPaths: [String] {
@@ -131,13 +131,13 @@ struct JobView: View {
         // Sizes first (local, quick): the bar and rows are right at once; then the comparison
         // with the destination, which can be slow on a busy or spinning drive.
         for s in j.sources where store.surveys[s.id] == nil {
-            if let size = await Task.detached(priority: .utility, operation: { try? Survey.size(of: s.readPath, excluded: Set(s.leftOut), patterns: s.namesLeftOut) }).value {
+            if let size = await Task.detached(priority: .utility, operation: { try? Survey.size(of: s.readPath, excluded: j.excluded(in: s), patterns: s.namesLeftOut) }).value {
                 store.surveys[s.id] = size
             }
         }
-        for s in j.sources {
+        for s in j.sources where !s.skip {   // an Exclude row is never compared: it isn't copied
             let target = j.target(for: s) ?? "/nonexistent-archivist-destination"
-            if let full = await Task.detached(priority: .utility, operation: { try? Survey.of(source: s.readPath, destination: target, excluded: Set(s.leftOut), patterns: s.namesLeftOut) }).value {
+            if let full = await Task.detached(priority: .utility, operation: { try? Survey.of(source: s.readPath, destination: target, excluded: j.excluded(in: s), patterns: s.namesLeftOut) }).value {
                 store.surveys[s.id] = full
             }
         }
@@ -192,23 +192,6 @@ struct JobView: View {
     }
 
 
-    /// Pick folders inside a source to leave out of the copy (a Dropbox folder, a cloud drive's cache).
-    func exclude(in s: Source) {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = true
-        panel.directoryURL = URL(fileURLWithPath: s.readPath)
-        panel.prompt = "Exclude"
-        guard panel.runModal() == .OK else { return }
-        let root = URL(fileURLWithPath: s.readPath).resolvingSymlinksInPath().path
-        // Stored relative to the source; a folder outside it can't be excluded from it.
-        let rel = panel.urls.compactMap { u -> String? in
-            let p = u.resolvingSymlinksInPath().path
-            return p.hasPrefix(root + "/") ? String(p.dropFirst(root.count + 1)) : nil
-        }
-        update(s) { $0.skipJunk = true; $0.leftOut = Array(Set($0.leftOut + rel)).sorted() }
-    }
 
     func update(_ s: Source, _ change: (inout Source) -> Void) {
         edit { j in if let i = j.sources.firstIndex(where: { $0.id == s.id }) { change(&j.sources[i]) } }
@@ -287,20 +270,21 @@ struct SourceRow: View {
                 Text(status).font(Typeface.text(12.5)).foregroundStyle(statusColor).lineLimit(1)
             }
             Spacer(minLength: 8)
-            // Three choices, one shown: Include (everything), Exclude (folders, and junk), Skip junk.
-            let mode = !s.leftOut.isEmpty ? 1 : s.skipJunk ? 0 : 2
+            // Three choices for the row itself. Exclude: this folder is not copied, and an Include
+            // row that holds it leaves it out.
+            let mode = s.skip ? 1 : s.skipJunk ? 0 : 2
             Menu {
-                Button { view.update(s) { $0.skipJunk = false; $0.leftOut = [] } } label: {
+                Button { view.update(s) { $0.skip = false; $0.skipJunk = false; $0.leftOut = [] } } label: {
                     Text("Include") + Text(mode == 2 ? "  ✓" : "")
                 }
-                Button { view.exclude(in: s) } label: {
-                    Text("Exclude…") + Text(mode == 1 ? "  ✓" : "")
+                Button { view.update(s) { $0.skip = true; $0.leftOut = [] } } label: {
+                    Text("Exclude") + Text(mode == 1 ? "  ✓" : "")
                 }
-                Button { view.update(s) { $0.skipJunk = true; $0.leftOut = [] } } label: {
+                Button { view.update(s) { $0.skip = false; $0.skipJunk = true; $0.leftOut = [] } } label: {
                     Text("Skip junk") + Text(mode == 0 ? "  ✓" : "")
                 }
             } label: {
-                Text(mode == 1 ? "Exclude (\(s.leftOut.count))" : mode == 0 ? "Skip junk" : "Include").font(Typeface.text(12.5))
+                Text(mode == 1 ? "Exclude" : mode == 0 ? "Skip junk" : "Include").font(Typeface.text(12.5))
             }
             .menuStyle(.borderlessButton).fixedSize()
             .tint(Palette.soft)
@@ -319,7 +303,7 @@ struct SourceRow: View {
     private var survey: Survey? { view.surveys[source.id] }
 
     private var status: String {
-        if source.skip { return "Paused" }
+        if source.skip { return survey.map { "\(bytes($0.bytes)), excluded" } ?? "Excluded" }
         guard let v = survey else { return "Calculating…" }
         let size = bytes(v.bytes)
         if !v.compared { return "\(size), calculating…" }

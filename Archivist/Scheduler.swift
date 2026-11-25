@@ -59,7 +59,7 @@ enum Scheduler {
             for (i, s) in live.enumerated() {
                 guard let target = job.target(for: s) else { continue }
                 var o = Options()
-                o.excluded = Set(s.leftOut)
+                o.excluded = job.excluded(in: s)
                 o.patterns = s.namesLeftOut
                 o.destinationKind = job.destinationKind
                 o.finalFlush = i == live.count - 1

@@ -8,11 +8,11 @@ A backup has sources (what to copy), a destination (where it goes), and one butt
 
 Drop folders, or a whole drive, on the left side, or click the dashed box and choose. Each source gets its own picture and colour, a size, and a line saying where it stands: "not backed up yet", "2 changes to back up (12 MB)", "up to date".
 
-On the right of each source, a menu chooses what to copy:
+On the right of each source, a menu says what happens to that folder:
 
+- **Skip junk** (the default): copy the folder, but leave out caches, temp files, and build folders that rebuild from the code beside them, such as `node_modules`, or `target` next to a `Cargo.toml`.
 - **Include**: copy every file in the folder.
-- **Exclude…**: choose folders inside the source to leave out, such as a Dropbox folder. Junk files are left out too.
-- **Skip junk** (the default): leave out caches, temp files, and build folders that rebuild from the code beside them, such as `node_modules`, or `target` next to a `Cargo.toml`.
+- **Exclude**: do not copy this folder. To leave a folder out of a bigger one, drop both in: the big folder as Skip junk or Include, the folder inside it (a Dropbox folder, say) as Exclude.
 
 The **ⓧ** removes the source from the backup. Nothing at the destination is touched by that.
 

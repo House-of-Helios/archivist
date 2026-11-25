@@ -20,12 +20,13 @@ enum Snapshot {
         let net = Drive(mountPoint: "/Volumes/Backup Drive", fileSystem: "smbfs", device: 2, kind: .network, name: "Backup Drive")
 
         var studio = Job(title: "Studio")
-        studio.sources = ["Garden", "Recipes", "Letters"].map { Source(path: "/Users/someone/Documents/" + $0) }
+        studio.sources = ["Garden", "Recipes", "Letters", "Recipes/Dropbox"].map { Source(path: "/Users/someone/Documents/" + $0) }
+        studio.sources[3].skip = true
+        studio.sources[2].skipJunk = false
         studio.sources[1].patterns = ["*.tmp"]
         for i in studio.sources.indices { studio.sources[i].color = Nippon.colors[i].hex }   // as add() counts through them
         studio.destination = "/Volumes/Backup Drive"
         studio.schedule = .daily(hour: 14, minute: 0)
-        studio.sources[2].leftOut = ["Dropbox"]
         studio.lastResult = "45 copied (701.6 MB), 0 already there"
         studio.lastRun = Date().addingTimeInterval(-3600 * 3)
         studio.lastBytes = 701_600_000
@@ -33,7 +34,7 @@ enum Snapshot {
         let store = JobStore(preview: [studio, photos])
 
         let surveys: [Source.ID: Survey] = Dictionary(uniqueKeysWithValues: zip(studio.sources.map(\.id), [
-            survey(412_000_000, 23, toCopy: 0), survey(240_000_000, 19, toCopy: 2, bytesToCopy: 12_000_000), survey(50_000_000, 3, new: true),
+            survey(412_000_000, 23, toCopy: 0), survey(240_000_000, 19, toCopy: 2, bytesToCopy: 12_000_000), survey(50_000_000, 3, new: true), survey(8_000_000_000, 900, new: true),
         ]))
         var drives: [String: Drive] = ["/Volumes/Backup Drive": net]
         for s in studio.sources { drives[s.readPath] = mac }
