@@ -340,7 +340,8 @@ final class Runner {
         stopping = false
         stopRequested = false
         progress = .init()
-        samples = []
+        fit = TimeFit()
+        lastStep = nil
         eta = nil
         etaAnchor = nil
         started = Date()
@@ -451,10 +452,14 @@ final class Runner {
     }
     @ObservationIgnored private var stopRequested = false
 
-    // Time left. Small files cost time per file, big files per byte, and the two lanes mix
-    // them; so both rates are measured over the last 30 s and the slower finish wins.
+    // Time left. Every file costs a fixed overhead (create, rename, a head move on a spinning
+    // disk) plus its bytes: seconds ≈ a·files + b·bytes. a and b are fitted over the whole run,
+    // each step weighted by how recent it is (half-life 5 min), so a patch of tiny or huge files
+    // only nudges the estimate. The old "last 30 s, slower rate wins" read 10 GB of mostly tiny
+    // files on a spinning disk as 40 hours.
     var eta: TimeInterval?
-    private var samples: [(Date, Int, Int64)] = []
+    @ObservationIgnored private var fit = TimeFit()
+    @ObservationIgnored private var lastStep: (date: Date, files: Int, bytes: Int64)?
     @ObservationIgnored private var lastLog = Date.distantPast
 
     /// The clock shown: counts down one second per second from the last estimate; a new
@@ -498,16 +503,13 @@ final class Runner {
         let now = Date()
         let o = overall
         let p = (filesDone: o.files, filesTotal: o.filesTotal, bytesDone: o.bytes, bytesTotal: o.bytesTotal)
-        samples.append((now, p.filesDone, p.bytesDone))
-        samples.removeAll { now.timeIntervalSince($0.0) > 30 }
-        guard let first = samples.first, now.timeIntervalSince(first.0) >= 5 else { return }
-        let dt = now.timeIntervalSince(first.0)
-        let fileRate = Double(p.filesDone - first.1) / dt
-        let byteRate = Double(p.bytesDone - first.2) / dt
-        let byFiles = fileRate > 0 ? Double(p.filesTotal - p.filesDone) / fileRate : .infinity
-        let byBytes = byteRate > 0 ? Double(p.bytesTotal - p.bytesDone) / byteRate : .infinity
-        let raw = max(byFiles.isFinite ? byFiles : 0, byBytes.isFinite ? byBytes : 0)
-        guard raw > 0 || p.filesDone == p.filesTotal else { return }
+        guard let last = lastStep else { lastStep = (now, p.filesDone, p.bytesDone); return }
+        let dt = now.timeIntervalSince(last.date)
+        guard dt >= 2 else { return }
+        fit.add(files: Double(p.filesDone - last.files), bytes: Double(p.bytesDone - last.bytes), seconds: dt)
+        lastStep = (now, p.filesDone, p.bytesDone)
+        guard now.timeIntervalSince(started) >= 8, let raw = fit.seconds(files: Double(p.filesTotal - p.filesDone),
+                                                                           bytes: Double(p.bytesTotal - p.bytesDone)) else { return }
         eta = eta.map { $0 * 0.8 + raw * 0.2 } ?? raw     // calm: no jumping minute to minute
         // The shown clock never ticks up: a shorter estimate eases in; a slightly longer one holds
         // the clock still; one over 25% longer jumps once (crawling up second by second felt broken).
@@ -529,5 +531,35 @@ final class Runner {
         let b = overall.bytes
         let dt = Date().timeIntervalSince(lastSample.0)
         if dt >= 0.5 { bytesPerSecond = bytesPerSecond == 0 ? Double(b - lastSample.1) / dt : bytesPerSecond * 0.7 + Double(b - lastSample.1) / dt * 0.3; lastSample = (Date(), b) }
+    }
+}
+
+/// seconds ≈ a·files + b·bytes, fitted by weighted least squares; older steps fade (half-life 5 min).
+struct TimeFit {
+    private var ff = 0.0, fb = 0.0, bb = 0.0, ft = 0.0, bt = 0.0
+    private static let halfLife = 300.0
+
+    mutating func add(files: Double, bytes: Double, seconds: Double) {
+        let keep = pow(0.5, seconds / Self.halfLife)
+        ff *= keep; fb *= keep; bb *= keep; ft *= keep; bt *= keep
+        let mb = bytes / 1e6   // MB keeps the sums on one scale
+        ff += files * files; fb += files * mb; bb += mb * mb
+        ft += files * seconds; bt += mb * seconds
+    }
+
+    /// nil until something has moved.
+    func seconds(files: Double, bytes: Double) -> TimeInterval? {
+        let mb = bytes / 1e6
+        let det = ff * bb - fb * fb
+        if ff > 0, bb > 0, det > 1e-6 * ff * bb {
+            let a = (ft * bb - bt * fb) / det, b = (bt * ff - ft * fb) / det
+            if a >= 0 && b >= 0 { return a * files + b * mb }
+        }
+        // Only one kind of file seen so far: small files cost per file, big files per byte. Telling
+        // them apart by the average size seen keeps a stretch of tiny files from pricing every
+        // remaining megabyte at a tiny file's speed.
+        guard ff > 0 || bb > 0 else { return nil }
+        let smallSoFar = fb / max(ff, 1e-9) < 1   // fb/ff: average MB per file, weighted
+        return smallSoFar && ff > 0 ? (ft / ff) * files : (bb > 0 ? (bt / bb) * mb : (ft / ff) * files)
     }
 }

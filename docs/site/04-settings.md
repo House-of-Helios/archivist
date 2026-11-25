@@ -16,9 +16,9 @@ The name is the backup's title in the tabs along the top. The picture and colour
 - **Once a day**, at the time you choose.
 - **Once a week**, on the day and at the time you choose.
 
-Scheduled backups run in the background without a window, through a small helper that macOS starts for you. The first time you choose a schedule, macOS asks you to allow Archivist in **System Settings → General → Login Items & Extensions**. If a scheduled backup skips files, you get a notification.
+Scheduled backups run while Archivist is open. Closing the window keeps Archivist running; quitting it stops the schedule until you open it again. A backup that was due while Archivist was closed runs when you open it.
 
-A scheduled backup that finds the drive unplugged does nothing and tries again at the next slot. A Mac that was asleep at the scheduled time runs the backup when it wakes.
+A scheduled backup that finds the drive unplugged does nothing and tries again at the next slot. A Mac that was asleep at the scheduled time runs the backup when it wakes, if Archivist is open.
 
 ## Earlier versions
 

@@ -11,39 +11,26 @@ enum Scheduler {
     static let plist = "com.houseofhelios.archivist.scheduler.plist"
     static var agent: SMAppService { SMAppService.agent(plistName: plist) }
 
-    /// Registered while any backup has a schedule; unregistered when none has. Only the window
-    /// does this: the helper itself never touches its own registration.
-    ///
-    /// macOS ties a registered agent to the signature of the build that registered it ("launch
-    /// constraint"). A different build (an update, a dev copy) is then killed at every start with
-    /// "Code Signature Invalid", which shows as "Archivist quit unexpectedly". So whenever this
-    /// build differs from the one that registered, the agent is registered again.
+    /// The launchd agent is retired: macOS kills an SMAppService agent of an app signed without
+    /// an Apple team ID at every start ("Launch Constraint Violation", even right after the same
+    /// build registered it), and each kill shows "Archivist quit unexpectedly". Any registration
+    /// an older build left is removed; schedules run while Archivist is open (`runDueInApp`).
     static func sync(_ jobs: [Job]) {
         guard !requested else { return }
-        let wanted = jobs.contains { $0.schedule != .byHand }
-        let build = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "") + " " + Bundle.main.bundlePath
-        let key = "schedulerRegisteredBy"
-        do {
-            if agent.status != .notRegistered && (!wanted || UserDefaults.standard.string(forKey: key) != build) {
-                try agent.unregister()
-                UserDefaults.standard.removeObject(forKey: key)
-            }
-            if wanted && agent.status != .enabled {
-                try agent.register()
-                UserDefaults.standard.set(build, forKey: key)
-            }
-        } catch {
-            DevLog.write("scheduler: \(error)")
-        }
+        if agent.status != .notRegistered { try? agent.unregister() }
     }
 
-    /// A plain sentence when macOS is holding the helper back, else nil.
-    static var statusNote: String? {
-        switch agent.status {
-        case .enabled: return nil
-        case .requiresApproval: return "macOS needs your OK: turn on Archivist in System Settings → General → Login Items."
-        case .notFound: return "The scheduler is missing from this copy of Archivist; reinstall it."
-        default: return "Scheduled backups aren't switched on yet."
+    /// The window's clock: every minute, start each backup whose time has come.
+    @MainActor static func runDueInApp(_ store: JobStore) {
+        let now = Date()
+        for job in store.jobs {
+            let present = job.destination.map { FileManager.default.fileExists(atPath: $0) } ?? false
+            let since = present ? (job.destinationSince ?? now) : nil
+            if since != job.destinationSince, let i = store.jobs.firstIndex(where: { $0.id == job.id }) { store.jobs[i].destinationSince = since }
+            guard job.ready, !store.runner(for: job.id).running,
+                  job.schedule.isDue(now: now, lastRun: job.lastRun, destinationSince: since) else { continue }
+            DevLog.write("schedule: starting \(job.title) (\(job.schedule.words))")
+            store.start(job.id)
         }
     }
 

@@ -183,6 +183,24 @@ struct JobView: View {
     }
 
 
+    /// Pick folders inside a source to leave out of the copy (a Dropbox folder, a cloud drive's cache).
+    func exclude(in s: Source) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.directoryURL = URL(fileURLWithPath: s.readPath)
+        panel.prompt = "Exclude"
+        guard panel.runModal() == .OK else { return }
+        let root = URL(fileURLWithPath: s.readPath).resolvingSymlinksInPath().path
+        // Stored relative to the source; a folder outside it can't be excluded from it.
+        let rel = panel.urls.compactMap { u -> String? in
+            let p = u.resolvingSymlinksInPath().path
+            return p.hasPrefix(root + "/") ? String(p.dropFirst(root.count + 1)) : nil
+        }
+        update(s) { $0.leftOut = Array(Set($0.leftOut + rel)).sorted() }
+    }
+
     func update(_ s: Source, _ change: (inout Source) -> Void) {
         edit { j in if let i = j.sources.firstIndex(where: { $0.id == s.id }) { change(&j.sources[i]) } }
     }
@@ -264,11 +282,17 @@ struct SourceRow: View {
                 Button { view.update(s) { $0.skipJunk = true } } label: {
                     Text("Skip junk files") + Text(s.skipJunk ? "  ✓" : "")
                 }
-                Button { view.update(s) { $0.skipJunk = false; $0.leftOut = []; $0.patterns = [] } } label: {
+                Button { view.update(s) { $0.skipJunk = false } } label: {
                     Text("Copy everything") + Text(s.skipJunk ? "" : "  ✓")
                 }
+                Divider()
+                Button("Exclude a folder…") { view.exclude(in: s) }
+                ForEach(s.leftOut, id: \.self) { rel in
+                    Button("Include \((rel as NSString).lastPathComponent) again") { view.update(s) { $0.leftOut.removeAll { $0 == rel } } }
+                }
             } label: {
-                Text(s.skipJunk ? "Skip junk files" : "Copy everything").font(Typeface.text(12.5))
+                Text((s.skipJunk ? "Skip junk files" : "Copy everything")
+                     + (s.leftOut.isEmpty ? "" : ", \(s.leftOut.count) excluded")).font(Typeface.text(12.5))
             }
             .menuStyle(.borderlessButton).fixedSize()
             .tint(Palette.soft)
@@ -388,16 +412,16 @@ struct DestinationPane: View {
                 if !view.runner.running && !view.runner.problems.isEmpty {
                     ProblemsLink(list: view.runner.problems).frame(maxWidth: .infinity).padding(.top, 6)
                 }
-                Text("Last backup: " + (job.lastRun.map { lastWords($0, job.lastBytes) } ?? "—"))
-                    .font(Typeface.text(12)).foregroundStyle(Palette.soft).frame(maxWidth: .infinity).padding(.top, 8)
                 Button { NotificationCenter.default.post(name: .showSettings, object: nil) } label: {
                     HStack(spacing: 5) {
                         Emoji(name: "spiral_calendar", size: 13)
-                        Text("Scheduled backup: " + (job.schedule == .byHand ? "—" : job.schedule.words))
-                            .font(Typeface.text(12)).foregroundStyle(Palette.soft)
+                        Text(job.schedule == .byHand ? "Schedule: —" : job.schedule.words)
+                            .font(Typeface.text(12)).foregroundStyle(Palette.soft).lineLimit(1)
                     }
                 }
-                .buttonStyle(.plain).frame(maxWidth: .infinity).padding(.top, 3)
+                .buttonStyle(.plain).frame(maxWidth: .infinity).padding(.top, 8)
+                Text("Last backup: " + (job.lastRun.map { lastWords($0, job.lastBytes) } ?? "—"))
+                    .font(Typeface.text(12)).foregroundStyle(Palette.soft).frame(maxWidth: .infinity).padding(.top, 3)
             } else {
                 DropHint(icon: job.icon, text: "Drop the destination folder here", action: view.chooseDestination)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -907,12 +931,6 @@ struct ScheduleChooser: View {
                     Text("at").foregroundStyle(Palette.soft)
                     time(h, m) { nh, nm in .weekly(weekday: d, hour: nh, minute: nm) }
                 }.padding(.leading, 22)
-            }
-            if s != .byHand {
-                if let note = Scheduler.statusNote {
-                    Text(note).font(Typeface.text(11.5, .semibold)).foregroundStyle(Palette.warn).fixedSize(horizontal: false, vertical: true)
-                    Button("Open Login Items") { SMAppService.openSystemSettingsLoginItems() }
-                }
             }
         }
         .font(Typeface.text(13))

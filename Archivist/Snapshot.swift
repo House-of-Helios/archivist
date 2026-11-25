@@ -24,6 +24,8 @@ enum Snapshot {
         studio.sources[1].patterns = ["*.tmp"]
         for i in studio.sources.indices { studio.sources[i].color = Nippon.colors[i].hex }   // as add() counts through them
         studio.destination = "/Volumes/Backup Drive"
+        studio.schedule = .daily(hour: 14, minute: 0)
+        studio.sources[2].leftOut = ["Dropbox"]
         studio.lastResult = "45 copied (701.6 MB), 0 already there"
         studio.lastRun = Date().addingTimeInterval(-3600 * 3)
         studio.lastBytes = 701_600_000

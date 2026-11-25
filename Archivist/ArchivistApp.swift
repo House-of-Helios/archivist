@@ -47,11 +47,17 @@ struct RootView: View {
         .background(Palette.ground)
         .ignoresSafeArea(.container, edges: .top)   // the strip makes room for the traffic lights itself; a changing inset jumped the layout
         .tint(Palette.accent)
+        .task {   // scheduled backups, while Archivist is open
+            while !Task.isCancelled {
+                Scheduler.runDueInApp(store)
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+            }
+        }
         .onAppear {
             if store.jobs.isEmpty { store.add() }
             selection = selection ?? store.jobs.first?.id
             DevLog.write("app open: \(store.jobs.count) backups")
-            Scheduler.sync(store.jobs)   // a new build re-registers the helper (or removes a stale one)
+            Scheduler.sync(store.jobs)   // removes the retired background helper if an older build left one
             #if DEBUG
             DevControl.start(store) { selection = $0 }
             #endif
