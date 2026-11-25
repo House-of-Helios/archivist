@@ -11,7 +11,10 @@ if [ -f "$K" ] && [ -f "$ROOT/_devdata/signing/keychain-password" ]; then
   # The password goes over stdin (`security -i`), never argv; the keychain locks again after.
   printf 'unlock-keychain -p "%s" "%s"\n' "$(cat "$ROOT/_devdata/signing/keychain-password")" "$K" | security -i
   trap 'security lock-keychain "$K" 2>/dev/null' EXIT
-  codesign --force --deep --options runtime --keychain "$K" -s Archivist "$APP"   # hardened runtime: no library injection into an app that may hold Full Disk Access
+  # Hardened runtime on Release (no library injection into an app that may hold Full Disk Access).
+  # Not on Debug: Xcode's Archivist.debug.dylib fails library validation under a team-less certificate.
+  RUNTIME=""; [ "${CONFIGURATION:-Release}" = "Release" ] && RUNTIME="--options runtime"
+  codesign --force --deep $RUNTIME --keychain "$K" -s Archivist "$APP"
 else
   echo "warning: no Archivist signing keychain; signing ad hoc (macOS will re-ask permissions after each build)"
   codesign --force --deep --options runtime -s - "$APP"

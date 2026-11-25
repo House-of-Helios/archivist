@@ -46,9 +46,10 @@ enum Snapshot {
         running.debugAnchor(255)
         running.currentSource = "Workouts"
 
-        func window(_ job: Job, _ r: Runner, _ s: [Source.ID: Survey], _ d: [String: Drive], space: Bool, missing: Bool = false) -> AnyView {
+        let update = UpdateInfo(version: "0.0.2", notes: "Folders with their own Finder icon show it.", history: [UpdateNote(version: "0.0.2", notes: "Folders with their own Finder icon show it.")])
+        func window(_ job: Job, _ r: Runner, _ s: [Source.ID: Survey], _ d: [String: Drive], space: Bool, missing: Bool = false, update: UpdateInfo? = nil) -> AnyView {
             AnyView(VStack(spacing: 0) {
-                TitleStrip(selection: .constant(job.id), drawn: true)
+                TitleStrip(selection: .constant(job.id), drawn: true, previewUpdate: update)
                 JobView(jobID: job.id, runnerOverride: r, destinationState: missing ? .folderMissing : .present, drives: d, presetSurveys: s,
                         space: space ? (free: 4_940_000_000_000, total: 4_950_000_000_000) : nil, preset: true)
             }.background(Palette.ground))
@@ -58,10 +59,18 @@ enum Snapshot {
             ("running", window(studio, running, surveys, drives, space: true)),
             ("new", window(photos, Runner(), [:], [:], space: false)),
             ("missing", window(studio, Runner(), surveys, drives, space: true, missing: true)),
+            ("update", window(studio, Runner(), surveys, drives, space: true, update: update)),
+        ]
+        let sheets: [(String, AnyView, CGSize)] = [
+            ("settings", AnyView(SettingsSheet(view: JobView(storeOverride: store, jobID: studio.id, runnerOverride: Runner(), destinationState: .present, drives: drives, presetSurveys: surveys, space: nil, preset: true))), CGSize(width: 520, height: 780)),
+            ("update-sheet", AnyView(UpdateSheet(update: update, current: "0.0.1", onLater: {}, onInstall: {})), CGSize(width: 480, height: 420)),
         ]
         for (name, dark) in [("dark", true), ("light", false)] {
             for (screen, view) in screens {
                 save(view, size: CGSize(width: 860, height: 580), dark: dark, to: "\(dir)/\(screen)-\(name).png", store: store)
+            }
+            for (screen, view, size) in sheets {
+                save(view, size: size, dark: dark, to: "\(dir)/\(screen)-\(name).png", store: store)
             }
         }
     }

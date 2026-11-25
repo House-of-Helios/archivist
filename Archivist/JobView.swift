@@ -6,7 +6,9 @@ import SwiftUI
 /// One backup: Sources on the left (a list that grows and scrolls), the Destination fixed on
 /// the right, the copy flowing across the seam between them, one button in the bottom bar.
 struct JobView: View {
-    @Environment(JobStore.self) private var store
+    @Environment(JobStore.self) private var envStore
+    var storeOverride: JobStore? = nil                 // snapshots: a sheet drawn on its own
+    var store: JobStore { storeOverride ?? envStore }
     let jobID: Job.ID
     var runnerOverride: Runner? = nil                  // snapshots
     var runner: Runner { runnerOverride ?? store.runner(for: jobID) }

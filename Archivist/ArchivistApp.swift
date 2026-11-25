@@ -64,6 +64,7 @@ struct TitleStrip: View {
     @Environment(JobStore.self) private var store
     @Binding var selection: Job.ID?
     var drawn = false   // snapshots: no traffic lights to clear
+    var previewUpdate: UpdateInfo? = nil   // snapshots: show the pill
 
     var body: some View {
         HStack(spacing: 6) {
@@ -95,7 +96,7 @@ struct TitleStrip: View {
                 .buttonStyle(.plain).foregroundStyle(Palette.soft).padding(8)
                 .help("New backup")
             Spacer()
-            UpdatePill()
+            UpdatePill(preset: previewUpdate)
             AppearanceSwitch()
         }
         .padding(.leading, 24)                // the pills' inner padding puts their pictures on Sources' 28 pt edge
@@ -200,6 +201,8 @@ struct AppearanceChoice: ViewModifier {
 struct UpdatePill: View {
     @State private var update: UpdateInfo?
     @State private var showing = false
+    private let preset: Bool
+    init(preset: UpdateInfo? = nil) { _update = State(initialValue: preset); self.preset = preset != nil }
     private let updater = Updater.shared
     static let green = Color(red: 0x7B / 255, green: 0xA0 / 255, blue: 0x5B / 255)
     private var current: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0" }
@@ -231,6 +234,7 @@ struct UpdatePill: View {
         }
         .padding(.trailing, 8)
         .task {
+            if preset { return }
             for _ in 0..<6 {   // GitHub may be unreachable for a moment at launch
                 let status = await Updater.check(current: current)
                 if let u = status.update { update = u; updater.prepare(u) }
