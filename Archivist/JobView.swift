@@ -32,10 +32,12 @@ struct JobView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 0) {   // top: a tall column never pushes its title up
                 SourcesPane(view: self)
                 DestinationPane(view: self)
                     .frame(width: 280)
+                    .frame(maxHeight: .infinity, alignment: .top).clipped()   // never taller than Sources: the row ends at the bottom bar
+                    
             }
             BottomBar(view: self)
         }
@@ -48,7 +50,8 @@ struct JobView: View {
                             .contentShape(Rectangle())
                             .onTapGesture { showingSettings = false }   // a click outside closes it
                         SettingsSheet(view: self, close: { showingSettings = false })
-                            .frame(width: min(560, g.size.width - 32), height: min(700, g.size.height - 32))   // never hangs past the window
+                            .fixedSize(horizontal: true, vertical: false)   // as wide as its two columns
+                            .frame(height: min(700, g.size.height - 32))   // never hangs past the window
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                             .shadow(color: .black.opacity(0.25), radius: 20, y: 6)
                     }
@@ -255,17 +258,11 @@ struct SourcesPane: View {
                 DropHint(text: "Drop folders or a drive here", action: view.chooseFolders)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                GeometryReader { g in
-                    // More rows than fit: stretch them a little so a whole number fills the view and the
-                    // last one's line meets the bottom bar (no sliver of a gap above it).
-                    let natural: CGFloat = 64, fit = max(1, (g.size.height / natural).rounded(.down))
-                    let rowH: CGFloat? = CGFloat(job.sources.count) > fit ? g.size.height / fit : nil
-                    ThinScroll {
-                        VStack(spacing: 0) {
-                            ForEach(view.sortedSources) { s in
-                                SourceRow(view: view, source: s).frame(height: rowH.map { $0 - 1 })
-                                Rectangle().fill(Palette.rule).frame(height: 1).padding(.leading, 76)
-                            }
+                ThinScroll {
+                    VStack(spacing: 0) {
+                        ForEach(view.sortedSources) { s in
+                            SourceRow(view: view, source: s).frame(height: SourceRow.height - 1)
+                            Rectangle().fill(Palette.rule).frame(height: 1).padding(.leading, 76)
                         }
                     }
                 }
@@ -283,6 +280,8 @@ struct SourcesPane: View {
 }
 
 struct SourceRow: View {
+    /// One row with its line: the smallest window is sized to hold exactly four.
+    static let height: CGFloat = 64
     let view: JobView
     let source: Source
 
@@ -378,7 +377,7 @@ struct DestinationPane: View {
     let view: JobView
     @State private var over = false
     @State private var height: CGFloat = 600
-    private var compact: Bool { height < 420 }   // a short window: smaller picture, no drive-kind line, tighter gaps
+    private var compact: Bool { height < 470 }   // a short window: smaller picture, no drive-kind line, tighter gaps
 
     var body: some View {
         let job = view.job
@@ -774,9 +773,11 @@ struct SettingsSheet: View {
                         .buttonStyle(.plain).foregroundStyle(Palette.soft).help("Close")
                 }
 
-                HStack(alignment: .top, spacing: 32) {
+                // Two columns sized by Schedule and Earlier versions; Icon and Background sit over them.
+                Grid(alignment: .topLeading, horizontalSpacing: 40, verticalSpacing: 24) {
+                    GridRow {
                     section("Icon") {
-                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(32), spacing: 4, alignment: .leading), count: 7),
+                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(32), spacing: 6, alignment: .leading), count: 4),
                                   alignment: .leading, spacing: 4) {
                             ForEach(Job.icons, id: \.self) { n in
                                 Button { view.edit { $0.icon = n; $0.lookChosen = true } } label: {
@@ -788,20 +789,19 @@ struct SettingsSheet: View {
                         .fixedSize()
                     }
                     section("Background") {
-                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(26), spacing: 10, alignment: .leading), count: 5),
+                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(32), spacing: 6, alignment: .leading), count: 4),
                                   alignment: .leading, spacing: 10) {
                             ForEach(Nippon.colors, id: \.hex) { c in
                                 Button { view.edit { $0.color = c.hex; $0.lookChosen = true } } label: {
-                                    Circle().fill(Nippon.color(c.hex)).frame(width: 26, height: 26)
-                                        .overlay(Circle().strokeBorder(c.hex == job.color ? Palette.ink : .clear, lineWidth: 2.5).padding(-3))
+                                    Circle().fill(Nippon.color(c.hex)).frame(width: 24, height: 24).frame(width: 32, height: 32)
+                                        .overlay(Circle().strokeBorder(c.hex == job.color ? Palette.ink : .clear, lineWidth: 2.5).padding(1))
                                 }.buttonStyle(.plain).help(c.name)
                             }
                         }
                         .fixedSize()
                     }
-                }
-
-                HStack(alignment: .top, spacing: 32) {
+                    }
+                    GridRow {
                     VStack(alignment: .leading, spacing: 22) {
                         section("Schedule") { ScheduleChooser(view: view) }
                         section("Threads") {
@@ -841,7 +841,9 @@ struct SettingsSheet: View {
                         }
                     }
                     .fixedSize()
+                    }
                 }
+                .frame(maxWidth: .infinity)
 
                 VStack(spacing: 8) {
                     Text("Appearance").font(Typeface.text(13, .semibold)).foregroundStyle(Palette.soft)

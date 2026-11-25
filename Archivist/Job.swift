@@ -83,7 +83,8 @@ struct Job: Codable, Identifiable, Hashable {
 
     /// Fluent emoji a backup can wear (picked at random, changeable in the Destination panel).
     /// Animals for backups (sources wear plants and food).
-    static let icons = ["fox", "owl", "dragon", "octopus", "turtle", "spouting_whale", "butterfly", "honeybee", "hedgehog", "snail",
+    // 24: a 4 × 6 grid in Settings, like the 24 colours. (The snail is the drive-speed "Very slow".)
+    static let icons = ["fox", "owl", "dragon", "octopus", "turtle", "spouting_whale", "butterfly", "honeybee", "hedgehog",
                         "cat", "dog", "rabbit", "elephant", "koala", "penguin", "frog", "tiger", "lion", "unicorn", "dolphin",
                         "sloth", "otter", "flamingo", "parrot"]
 
@@ -149,7 +150,7 @@ struct Job: Codable, Identifiable, Hashable {
         destinationSince = try c.decodeIfPresent(Date.self, forKey: .destinationSince)
         // Backups saved before icons: a steady pick from the id, so it never changes between launches.
         let saved = try c.decodeIfPresent(String.self, forKey: .icon)
-        icon = saved.flatMap { Job.icons.contains($0) ? $0 : nil } ?? Job.icons[Int(id.uuid.0) % Job.icons.count]  // backups are animals now
+        icon = saved.flatMap { Job.icons.contains($0) || $0 == "snail" ? $0 : nil } ?? Job.icons[Int(id.uuid.0) % Job.icons.count]  // backups are animals now
         color = try c.decodeIfPresent(String.self, forKey: .color) ?? Nippon.colors[Int(id.uuid.2) % Nippon.colors.count].hex
         lookChosen = try c.decodeIfPresent(Bool.self, forKey: .lookChosen) ?? false
         if let new = try c.decodeIfPresent([Source].self, forKey: .sources) {
