@@ -198,7 +198,7 @@ struct JobView: View {
             let p = u.resolvingSymlinksInPath().path
             return p.hasPrefix(root + "/") ? String(p.dropFirst(root.count + 1)) : nil
         }
-        update(s) { $0.leftOut = Array(Set($0.leftOut + rel)).sorted() }
+        update(s) { $0.skipJunk = true; $0.leftOut = Array(Set($0.leftOut + rel)).sorted() }
     }
 
     func update(_ s: Source, _ change: (inout Source) -> Void) {
@@ -278,21 +278,21 @@ struct SourceRow: View {
                 Text(status).font(Typeface.text(12.5)).foregroundStyle(statusColor).lineLimit(1)
             }
             Spacer(minLength: 8)
+            // Three choices, one shown. Exclude keeps junk skipped too; Copy everything clears both.
+            let mode = !s.leftOut.isEmpty ? 1 : s.skipJunk ? 0 : 2
             Menu {
-                Button { view.update(s) { $0.skipJunk = true } } label: {
-                    Text("Skip junk files") + Text(s.skipJunk ? "  ✓" : "")
+                Button { view.update(s) { $0.skipJunk = true; $0.leftOut = [] } } label: {
+                    Text("Skip junk files") + Text(mode == 0 ? "  ✓" : "")
                 }
-                Button { view.update(s) { $0.skipJunk = false } } label: {
-                    Text("Copy everything") + Text(s.skipJunk ? "" : "  ✓")
+                Button { view.exclude(in: s) } label: {
+                    Text("Exclude folders…") + Text(mode == 1 ? "  ✓" : "")
                 }
-                Divider()
-                Button("Exclude a folder…") { view.exclude(in: s) }
-                ForEach(s.leftOut, id: \.self) { rel in
-                    Button("Include \((rel as NSString).lastPathComponent) again") { view.update(s) { $0.leftOut.removeAll { $0 == rel } } }
+                Button { view.update(s) { $0.skipJunk = false; $0.leftOut = [] } } label: {
+                    Text("Copy everything") + Text(mode == 2 ? "  ✓" : "")
                 }
             } label: {
-                Text((s.skipJunk ? "Skip junk files" : "Copy everything")
-                     + (s.leftOut.isEmpty ? "" : ", \(s.leftOut.count) excluded")).font(Typeface.text(12.5))
+                Text(mode == 1 ? "Excluding \(s.leftOut.count) \(s.leftOut.count == 1 ? "folder" : "folders")"
+                     : mode == 0 ? "Skip junk files" : "Copy everything").font(Typeface.text(12.5))
             }
             .menuStyle(.borderlessButton).fixedSize()
             .tint(Palette.soft)
