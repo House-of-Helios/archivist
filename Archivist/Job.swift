@@ -192,6 +192,9 @@ final class JobStore {
             let x = surveys[a.element.id]?.bytes ?? -1, y = surveys[b.element.id]?.bytes ?? -1
             return x != y ? x > y : a.offset < b.offset
         }.map { $0.element }
+        let live = job.sources.filter { !$0.skip }.compactMap { surveys[$0.id] }.filter(\.compared)
+        runner(for: id).plannedSmall = live.reduce(0) { $0 + $1.smallToCopy }
+        runner(for: id).plannedBig = live.reduce(0) { $0 + $1.bigBytesToCopy }
         runner(for: id).start(ordered, planned: planned) { [weak self] summary, state, past, total in
             guard let self, let i = self.jobs.firstIndex(where: { $0.id == id }) else { return }
             var j = self.jobs[i]
@@ -329,12 +332,16 @@ final class Runner {
     var stopping = false                 // Stop pressed: say so at once, even while the drive finishes
     var currentSource: String?
     var plannedFiles = 0
+    var plannedSmall = 0
+    var doneSmall = 0
+    var plannedBig: Int64 = 0
+    var doneBig: Int64 = 0
     var doneFiles = 0
     var plannedBytes: Int64 = 0
     var doneBytes: Int64 = 0
     /// Across every source: (files, bytes) done and in total.
     var overall: (files: Int, filesTotal: Int, bytes: Int64, bytesTotal: Int64) {
-        let f = doneFiles + progress.filesDone, b = doneBytes + progress.bytesDone
+        let f = doneFiles + progress.filesDone, b = doneBytes + progress.bytesDone + progress.inFlight
         return (f, max(plannedFiles, doneFiles + progress.filesTotal, f), b, max(plannedBytes, doneBytes + progress.bytesTotal, b))
     }
     /// Every file copied, the run still flushing and setting folder dates.
@@ -364,7 +371,6 @@ final class Runner {
         stopping = false
         stopRequested = false
         progress = .init()
-        fit = TimeFit()
         lastStep = nil
         eta = nil
         etaAnchor = nil
@@ -376,6 +382,10 @@ final class Runner {
         pace = nil
         paceStart = Date()
         paceKey = "pace:" + (job.destination.map { p in let c = (p as NSString).pathComponents; return c.count > 2 && c[1] == "Volumes" ? c[2] : "/" } ?? "")
+        let d = UserDefaults.standard   // this drive's speeds from earlier runs, or a spinning disk's until measured
+        secPerSmall = d.double(forKey: paceKey + ".sps").nonZero ?? 1.0 / 40
+        secPerMB = d.double(forKey: paceKey + ".spm").nonZero ?? 1.0 / 20   // 20 MB/s: a tired spinning disk, not a fresh one
+        measuredSmall = false; measuredBig = false
         let runs = job.sources.filter { !$0.skip }.compactMap { s in job.target(for: s).map { (s, $0) } }
         if let d = job.destination, let root = job.pastRoot {   // earlier names (_Past, _Archive) -> _📚archive, once
             for old in Names.legacyPasts where !FileManager.default.fileExists(atPath: root) {
@@ -392,6 +402,8 @@ final class Runner {
         plannedBytes = planned.bytes
         doneFiles = 0
         doneBytes = 0
+        doneSmall = 0
+        doneBig = 0
         Thread.detachNewThread { [self] in
             var copied = 0, unchanged = 0, retired = 0
             var bytes: Int64 = 0, total: Int64 = 0
@@ -433,6 +445,10 @@ final class Runner {
                     DispatchQueue.main.async {
                         self.doneFiles += self.progress.filesTotal
                         self.doneBytes += self.progress.bytesTotal
+                        self.doneSmall += self.progress.smallTotal
+                        self.doneBig += self.progress.bigBytesTotal
+                        self.progress = .init()   // the next source starts from nothing (a stale count gave negative rates)
+                        self.lastSample = (Date(), self.overall.bytes, self.overall.files)
                     }
                     copied += r.copied; unchanged += r.unchanged; retired += r.retired; bytes += r.bytes
                     total += r.sourceBytes   // counted by the run itself (a second scan per source cost ~0.5 s)
@@ -459,6 +475,9 @@ final class Runner {
                 if !removed.isEmpty { DevLog.write("earlier versions removed: \(removed.joined(separator: ", "))") }
             }
             DispatchQueue.main.async {
+                let d = UserDefaults.standard   // what this drive did, for the next estimate
+                if self.measuredSmall { d.set(self.secPerSmall, forKey: self.paceKey + ".sps") }
+                if self.measuredBig { d.set(self.secPerMB, forKey: self.paceKey + ".spm") }
                 ProcessInfo.processInfo.endActivity(awake)
                 self.problems = problems
                 self.running = false
@@ -487,7 +506,12 @@ final class Runner {
     // only nudges the estimate. The old "last 30 s, slower rate wins" read 10 GB of mostly tiny
     // files on a spinning disk as 40 hours.
     var eta: TimeInterval?
-    @ObservationIgnored private var fit = TimeFit()
+    /// Seconds per small file and per big megabyte on this drive: learned in the run, remembered
+    /// per drive across runs, and a careful default for the drive's kind before either.
+    @ObservationIgnored private var secPerSmall = 0.03
+    @ObservationIgnored private var secPerMB = 0.03
+    @ObservationIgnored private var measuredSmall = false
+    @ObservationIgnored private var measuredBig = false
     @ObservationIgnored private var lastStep: (date: Date, files: Int, bytes: Int64)?
     @ObservationIgnored private var lastLog = Date.distantPast
 
@@ -538,16 +562,26 @@ final class Runner {
     }
 
     private func updateETA(_ p0: ArchivistCore.Progress) {
+        // Two kinds of work, priced apart: seconds per small file and seconds per big megabyte, each
+        // measured only while that kind is moving (a small-file stretch said nothing about big files
+        // and priced 4 GB of them as nearly free). Until measured, the drive's own past speeds.
         let now = Date()
-        let o = overall
-        let p = (filesDone: o.files, filesTotal: o.filesTotal, bytesDone: o.bytes, bytesTotal: o.bytesTotal)
-        guard let last = lastStep else { lastStep = (now, p.filesDone, p.bytesDone); return }
+        let small = doneSmall + progress.smallDone
+        let big = Double(doneBig + progress.bigBytesDone + progress.inFlight) / 1e6
+        guard let last = lastStep else { lastStep = (now, small, Int64(big * 1e6)); return }
         let dt = now.timeIntervalSince(last.date)
         guard dt >= 2 else { return }
-        fit.add(files: Double(p.filesDone - last.files), bytes: Double(p.bytesDone - last.bytes), seconds: dt)
-        lastStep = (now, p.filesDone, p.bytesDone)
-        guard now.timeIntervalSince(started) >= 8, let raw = fit.seconds(files: Double(p.filesTotal - p.filesDone),
-                                                                           bytes: Double(p.bytesTotal - p.bytesDone)) else { return }
+        let dSmall = Double(small - last.files), dBig = big - Double(last.bytes) / 1e6
+        let w = 1 - pow(0.5, dt / 300)   // the last five minutes count most
+        let both = lanes?.together ?? false
+        if dSmall > 0 && (both || dBig < 1) { secPerSmall = secPerSmall * (1 - w) + (dt / dSmall) * w; measuredSmall = true }
+        if dBig >= 1 && (both || dSmall < 1) { secPerMB = secPerMB * (1 - w) + (dt / dBig) * w; measuredBig = true }
+        lastStep = (now, small, Int64(big * 1e6))
+        guard now.timeIntervalSince(started) >= 8 else { return }
+        let smallLeft = Double(max(0, max(plannedSmall, doneSmall + progress.smallTotal) - small))
+        let bigLeft = max(0, Double(max(plannedBig, doneBig + progress.bigBytesTotal)) / 1e6 - big)
+        let a = smallLeft * secPerSmall, bTime = bigLeft * secPerMB
+        let raw = both ? max(a, bTime) : a + bTime   // a spinning disk does one after the other
         eta = eta.map { $0 * 0.8 + raw * 0.2 } ?? raw     // calm: no jumping minute to minute
         // The shown clock never ticks up: a shorter estimate eases in; a slightly longer one holds
         // the clock still; one over 25% longer jumps once (crawling up second by second felt broken).
@@ -586,32 +620,4 @@ final class Runner {
     }
 }
 
-/// seconds ≈ a·files + b·bytes, fitted by weighted least squares; older steps fade (half-life 5 min).
-struct TimeFit {
-    private var ff = 0.0, fb = 0.0, bb = 0.0, ft = 0.0, bt = 0.0
-    private static let halfLife = 300.0
-
-    mutating func add(files: Double, bytes: Double, seconds: Double) {
-        let keep = pow(0.5, seconds / Self.halfLife)
-        ff *= keep; fb *= keep; bb *= keep; ft *= keep; bt *= keep
-        let mb = bytes / 1e6   // MB keeps the sums on one scale
-        ff += files * files; fb += files * mb; bb += mb * mb
-        ft += files * seconds; bt += mb * seconds
-    }
-
-    /// nil until something has moved.
-    func seconds(files: Double, bytes: Double) -> TimeInterval? {
-        let mb = bytes / 1e6
-        let det = ff * bb - fb * fb
-        if ff > 0, bb > 0, det > 1e-6 * ff * bb {
-            let a = (ft * bb - bt * fb) / det, b = (bt * ff - ft * fb) / det
-            if a >= 0 && b >= 0 { return a * files + b * mb }
-        }
-        // Only one kind of file seen so far: small files cost per file, big files per byte. Telling
-        // them apart by the average size seen keeps a stretch of tiny files from pricing every
-        // remaining megabyte at a tiny file's speed.
-        guard ff > 0 || bb > 0 else { return nil }
-        let smallSoFar = fb / max(ff, 1e-9) < 1   // fb/ff: average MB per file, weighted
-        return smallSoFar && ff > 0 ? (ft / ff) * files : (bb > 0 ? (bt / bb) * mb : (ft / ff) * files)
-    }
-}
+extension Double { var nonZero: Double? { self > 0 ? self : nil } }

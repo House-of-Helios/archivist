@@ -67,6 +67,11 @@ public struct Progress: Sendable {
     public var stage: Stage = .looking
     public var filesDone = 0, filesTotal = 0
     public var bytesDone: Int64 = 0, bytesTotal: Int64 = 0
+    /// The two kinds of work, apart: small files cost time per file, big files time per byte.
+    public var smallDone = 0, smallTotal = 0
+    public var bigBytesDone: Int64 = 0, bigBytesTotal: Int64 = 0
+    /// Bytes of big files still being copied (counted as they go, not when the file is whole).
+    public var inFlight: Int64 = 0
     public var current = ""
     public init() {}
 }
@@ -108,6 +113,8 @@ public final class Engine {
     private var stamp = ""
     private var newPaths = Set<String>()
     private var deadRunStarted: Double?
+    private var inFlight: [UnsafeRawPointer: Int64] = [:]   // per copy in progress
+    private var lastInFlightReport = Date.distantPast
     private var busy: [Entry] = []          // files that kept changing: tried again once at the end
     private var retryingBusy = false
     public var onProgress: ((Progress) -> Void)?
@@ -284,6 +291,10 @@ public final class Engine {
 
         var small = jobs.filter { $0.size < options.bigFile }
         let big = jobs.filter { $0.size >= options.bigFile }
+        lock.lock()
+        progress.smallTotal = small.count + linkLater.count
+        progress.bigBytesTotal = big.reduce(0) { $0 + $1.size }
+        lock.unlock()
         if lanes.diskOrder { small = sortedByDiskOffset(small) }
 
         if lanes.together {
@@ -375,11 +386,20 @@ public final class Engine {
             // A status callback lets Stop cut a file mid-copy (COPYFILE_QUIT); its temp is removed,
             // never renamed, so nothing half-copied is kept.
             let state = copyfile_state_alloc()
-            defer { copyfile_state_free(state) }
+            defer {   // a failed or stopped copy no longer counts as in flight
+                lock.lock(); inFlight[UnsafeRawPointer(state!)] = nil; progress.inFlight = inFlight.values.reduce(0, +); lock.unlock()
+                copyfile_state_free(state)
+            }
             let me = Unmanaged.passUnretained(self).toOpaque()
-            let cb: copyfile_callback_t = { _, _, _, _, _, ctx in
+            let cb: copyfile_callback_t = { what, stage, state, _, _, ctx in
                 guard let ctx else { return COPYFILE_CONTINUE }
-                return Unmanaged<Engine>.fromOpaque(ctx).takeUnretainedValue().isStopped ? COPYFILE_QUIT : COPYFILE_CONTINUE
+                let engine = Unmanaged<Engine>.fromOpaque(ctx).takeUnretainedValue()
+                if what == COPYFILE_COPY_DATA && stage == COPYFILE_PROGRESS, let state {
+                    var copied: off_t = 0   // how far this big file has got: the bar moves while it copies
+                    copyfile_state_get(state, UInt32(COPYFILE_STATE_COPIED), &copied)
+                    engine.copying(Int64(copied), of: state)
+                }
+                return engine.isStopped ? COPYFILE_QUIT : COPYFILE_CONTINUE
             }
             // Only on big files: a small one is done in a blink anyway (measured: the callback itself
             // costs little; the per-batch flush was the cost).
@@ -432,13 +452,28 @@ public final class Engine {
             batch.bytes += e.size
             // Progress moves per file copied, not per batch renamed (a batch is up to 64 files).
             lock.lock()
+            inFlight[UnsafeRawPointer(state!)] = nil
+            progress.inFlight = inFlight.values.reduce(0, +)
             progress.filesDone += 1
             progress.bytesDone += e.size
+            if e.size < options.bigFile { progress.smallDone += 1 } else { progress.bigBytesDone += e.size }
             let p = progress
             lock.unlock()
             onProgress?(p)
             return
         }
+    }
+
+    /// A big file's copy has reached `bytes`: shown at most twice a second.
+    fileprivate func copying(_ bytes: Int64, of state: copyfile_state_t) {
+        lock.lock()
+        inFlight[UnsafeRawPointer(state)] = bytes
+        progress.inFlight = inFlight.values.reduce(0, +)
+        let due = Date().timeIntervalSince(lastInFlightReport) > 0.5
+        if due { lastInFlightReport = Date() }
+        let p = progress
+        lock.unlock()
+        if due { onProgress?(p) }
     }
 
     /// A write barrier puts every temp file's data ahead of the renames that follow, then each is
@@ -494,7 +529,7 @@ public final class Engine {
         var st = stat()
         if lstat(target, &st) == 0 && options.keepChanged && !retire(e.path, gone: false) { unlink(temp); return }
         if rename(temp, target) != 0 { note(ArchivistError.io("rename", target, errno)); unlink(temp); return }
-        lock.lock(); copied += 1; progress.filesDone += 1; let p = progress; lock.unlock()
+        lock.lock(); copied += 1; progress.filesDone += 1; progress.smallDone += 1; let p = progress; lock.unlock()
         onProgress?(p)
     }
 
@@ -648,6 +683,8 @@ public struct Survey: Sendable {
     public var bytes: Int64 = 0            // everything in the source (after leaving out)
     public var toCopy = 0
     public var bytesToCopy: Int64 = 0
+    public var smallToCopy = 0               // files under the big-file size
+    public var bigBytesToCopy: Int64 = 0     // bytes of files at or above it
     public var destinationExists = false
     public var compared = true             // false: only the source's size is known so far
 
@@ -669,7 +706,13 @@ public struct Survey: Sendable {
         let (entries, _) = try src.scan(source)
         for e in entries where e.kind == .file { s.files += 1; s.bytes += e.size }
         s.destinationExists = FileManager.default.fileExists(atPath: destination)
-        guard s.destinationExists else { s.toCopy = entries.filter { $0.kind != .directory }.count; s.bytesToCopy = s.bytes; return s }
+        guard s.destinationExists else {
+            let files = entries.filter { $0.kind != .directory }, bigFile = Options().bigFile
+            s.toCopy = files.count; s.bytesToCopy = s.bytes
+            s.smallToCopy = files.filter { $0.size < bigFile }.count
+            s.bigBytesToCopy = files.filter { $0.size >= bigFile }.reduce(0) { $0 + $1.size }
+            return s
+        }
         var dst = TreeScanner(skipRootNames: Set([Names.past, Names.state] + Names.legacyPasts))
         dst.patterns = patterns + Options.alwaysLeftOut
         let (dEntries, _) = try dst.scan(destination)
@@ -677,6 +720,9 @@ public struct Survey: Sendable {
         let c = Compare.changes(source: entries, destination: dEntries, mtimeWindow: window)
         s.toCopy = c.copy.count
         s.bytesToCopy = c.bytes
+        let bigFile = Options().bigFile
+        s.smallToCopy = c.copy.filter { $0.size < bigFile }.count
+        s.bigBytesToCopy = c.copy.filter { $0.size >= bigFile }.reduce(0) { $0 + $1.size }
         return s
     }
 }
