@@ -41,7 +41,7 @@ struct Source: Codable, Identifiable, Hashable {
         addedAt = try c.decodeIfPresent(Date.self, forKey: .addedAt)
         let seed = Int(id.uuid.1)   // saved before pictures: a steady pick, never changing between launches
         icon = try c.decodeIfPresent(String.self, forKey: .icon) ?? Source.icons[seed % Source.icons.count]
-        color = try c.decodeIfPresent(String.self, forKey: .color) ?? Nippon.colors[seed % Nippon.colors.count].hex
+        color = Nippon.current(try c.decodeIfPresent(String.self, forKey: .color) ?? Nippon.colors[seed % Nippon.colors.count].hex)
     }
 
     /// The folder or drive carries its own Finder icon (a hidden `Icon\r` file, or a drive's
@@ -151,7 +151,7 @@ struct Job: Codable, Identifiable, Hashable {
         // Backups saved before icons: a steady pick from the id, so it never changes between launches.
         let saved = try c.decodeIfPresent(String.self, forKey: .icon)
         icon = saved.flatMap { Job.icons.contains($0) || $0 == "snail" ? $0 : nil } ?? Job.icons[Int(id.uuid.0) % Job.icons.count]  // backups are animals now
-        color = try c.decodeIfPresent(String.self, forKey: .color) ?? Nippon.colors[Int(id.uuid.2) % Nippon.colors.count].hex
+        color = Nippon.current(try c.decodeIfPresent(String.self, forKey: .color) ?? Nippon.colors[Int(id.uuid.2) % Nippon.colors.count].hex)
         lookChosen = try c.decodeIfPresent(Bool.self, forKey: .lookChosen) ?? false
         if let new = try c.decodeIfPresent([Source].self, forKey: .sources) {
             sources = new

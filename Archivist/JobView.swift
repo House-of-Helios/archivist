@@ -245,6 +245,17 @@ struct SourcesPane: View {
                 Text("Sources").font(Typeface.title(24)).foregroundStyle(Palette.ink)
                 AddButton(view: view)
                 Spacer()
+                // What this backup will copy, between the title and the count: it lived under the space
+                // bar, and appearing there made the Destination box grow and push the page.
+                let needed = job.sources.filter { !$0.skip }.compactMap { view.surveys[$0.id] }.filter(\.compared).reduce(Int64(0)) { $0 + $1.bytesToCopy }
+                if needed > 0 {
+                    let free = view.space?.free ?? .max
+                    Text(needed <= free ? "This backup needs \(bytes(needed))" : "Needs \(bytes(needed)), \(bytes(needed - free)) more than is free")
+                        .font(Typeface.text(13, needed <= free ? .regular : .semibold))
+                        .foregroundStyle(needed <= free ? Palette.ink : Palette.warn)
+                        .lineLimit(1)
+                    Spacer()
+                }
                 if !job.sources.isEmpty {
                     Text("\(job.sources.count) \(job.sources.count == 1 ? "item" : "items"), \(bytes(total))")
                         .font(Typeface.text(13)).foregroundStyle(Palette.soft)
@@ -377,7 +388,7 @@ struct DestinationPane: View {
     let view: JobView
     @State private var over = false
     @State private var height: CGFloat = 600
-    private var compact: Bool { height < 470 }   // a short window: smaller picture, no drive-kind line, tighter gaps
+    private var compact: Bool { height < 380 }   // a short window: smaller picture, no drive-kind line, tighter gaps
 
     var body: some View {
         let job = view.job
@@ -548,13 +559,6 @@ struct SpaceBar: View {
             }
             .frame(height: 8)
             Text("\(bytes(free)) free of \(bytes(total))").font(Typeface.text(12)).foregroundStyle(Palette.soft)
-            if needed > 0 {
-                Text(needed <= free ? "This backup needs \(bytes(needed))" : "Needs \(bytes(needed)): \(bytes(needed - free)) more than is free")
-                    .font(Typeface.text(12, needed <= free ? .regular : .semibold))
-                    .foregroundStyle(needed <= free ? Palette.ink : Palette.warn)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
     }
 }
@@ -757,6 +761,7 @@ struct SettingsSheet: View {
     var close: () -> Void = {}
     @Environment(JobStore.self) private var store
     @AppStorage("appearance") private var appearance = "system"
+    @Environment(\.colorScheme) private var scheme
     @State private var name = ""
     @State private var confirmDelete = false
 
@@ -778,7 +783,7 @@ struct SettingsSheet: View {
                     GridRow {
                     section("Icon") {
                         LazyVGrid(columns: Array(repeating: GridItem(.fixed(32), spacing: 6, alignment: .leading), count: 4),
-                                  alignment: .leading, spacing: 4) {
+                                  alignment: .leading, spacing: 6) {
                             ForEach(Job.icons, id: \.self) { n in
                                 Button { view.edit { $0.icon = n; $0.lookChosen = true } } label: {
                                     Emoji(name: n, size: 21).frame(width: 32, height: 32)
@@ -790,11 +795,11 @@ struct SettingsSheet: View {
                     }
                     section("Background") {
                         LazyVGrid(columns: Array(repeating: GridItem(.fixed(32), spacing: 6, alignment: .leading), count: 4),
-                                  alignment: .leading, spacing: 10) {
+                                  alignment: .leading, spacing: 6) {
                             ForEach(Nippon.colors, id: \.hex) { c in
                                 Button { view.edit { $0.color = c.hex; $0.lookChosen = true } } label: {
-                                    Circle().fill(Nippon.color(c.hex)).frame(width: 24, height: 24).frame(width: 32, height: 32)
-                                        .overlay(Circle().strokeBorder(c.hex == job.color ? Palette.ink : .clear, lineWidth: 2.5).padding(1))
+                                    Circle().fill(Nippon.color(c.hex)).frame(width: 26, height: 26).frame(width: 32, height: 32)   // same cell as an icon: the rows line up
+                                        .overlay(Circle().strokeBorder(c.hex == job.color ? Palette.ink : .clear, lineWidth: 2))
                                 }.buttonStyle(.plain).help(c.name)
                             }
                         }
@@ -847,12 +852,21 @@ struct SettingsSheet: View {
 
                 VStack(spacing: 8) {
                     Text("Appearance").font(Typeface.text(13, .semibold)).foregroundStyle(Palette.soft)
-                    Picker("", selection: $appearance) {
-                        Text("Follow the Mac").tag("system")
-                        Text("Light").tag("light")
-                        Text("Dark").tag("dark")
+                    // Drawn here, not the system's segmented control: the chosen one in the app's lavender,
+                    // its words dark in light mode and light in dark mode.
+                    HStack(spacing: 2) {
+                        ForEach([("system", "Follow the Mac"), ("light", "Light"), ("dark", "Dark")], id: \.0) { tag, words in
+                            Button { appearance = tag } label: {
+                                Text(words).font(Typeface.text(13, appearance == tag ? .semibold : .regular))
+                                    .foregroundStyle(appearance == tag ? (scheme == .dark ? Color.white : Color.black) : Palette.ink)
+                                    .padding(.horizontal, 14).padding(.vertical, 5)
+                                    .background(Capsule().fill(appearance == tag ? Palette.accent : .clear))
+                                    .contentShape(Capsule())
+                            }.buttonStyle(.plain)
+                        }
                     }
-                    .pickerStyle(.segmented).labelsHidden().fixedSize()   // fixed: a hidden label's room shifted it per selection
+                    .padding(2)
+                    .background(Capsule().fill(Palette.rule.opacity(0.6)))
                 }
                 .frame(maxWidth: .infinity)
 
@@ -861,7 +875,7 @@ struct SettingsSheet: View {
                     Button("Delete this backup…", role: .destructive) { confirmDelete = true }
                         .foregroundStyle(Palette.warn)
                     Spacer()
-                    Button("Save") { saveName(); close() }.keyboardShortcut(.defaultAction)
+                    Button("Save") { saveName(); close() }.buttonStyle(PrimaryButton()).keyboardShortcut(.defaultAction)
                 }
             }
             .padding(26)

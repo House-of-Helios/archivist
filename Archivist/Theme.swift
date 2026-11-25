@@ -46,13 +46,24 @@ struct Emoji: View {
 /// 24 traditional Japanese (Nippon) colours, in an order where consecutive entries sit far apart, so counting through them never gives neighbours alike.
 enum Nippon {
     static let colors: [(hex: String, name: String)] = [
-        ("#90B44B", "Hiwamoegi"), ("#E83015", "Syojyohi"), ("#D19826", "Yamabukicha"), ("#7B90D2", "Benimidori"),
-        ("#5DAC81", "Wakatake"), ("#986DB2", "Hashita"), ("#2EA9DF", "Tsuyukusa"), ("#C1693C", "Kaba"),
-        ("#E03C8A", "Tsutsuji"), ("#3A8FB7", "Chigusa"), ("#E98B2A", "Beniukon"), ("#D0104C", "Karakurenai"),
-        ("#DC9FB4", "Nadeshiko"), ("#F596AA", "Momo"), ("#B481BB", "Benifuji"), ("#A5DEE4", "Kamenozoki"),
-        ("#81C7D4", "Mizu"), ("#7DB9DE", "Wasurenagusa"), ("#A8D8B9", "Byakuroku"), ("#86C166", "Nae"),
-        ("#F7D94C", "Nanohana"), ("#FFB11B", "Yamabuki"), ("#FB966E", "Araisyu"), ("#E87A90", "Usubeni"),
+        // Deep and clear, one of every hue (Helios, 2026-11-25: fewer pastels, nothing only "cute").
+        ("#90B44B", "Hiwamoegi"), ("#CB4042", "Akabeni"), ("#2EA9DF", "Tsuyukusa"), ("#FFB11B", "Yamabuki"),
+        ("#77428D", "Edomurasaki"), ("#00896C", "Aotake"), ("#F05E1C", "Ohni"), ("#005CAF", "Ruri"),
+        ("#D19826", "Yamabukicha"), ("#C1328E", "Botan"), ("#1B813E", "Tokiwa"), ("#C1693C", "Kaba"),
+        ("#6A4C9C", "Kikyo"), ("#33A6B8", "Asagi"), ("#9F353A", "Enji"), ("#5DAC81", "Wakatake"),
+        ("#DB4D6D", "Nakabeni"), ("#006284", "Hanada"), ("#F6C555", "Kuchinashi"), ("#947A6D", "Kurumi"),
+        ("#8B81C3", "Fuji"), ("#E83015", "Syojyohi"), ("#51A8DD", "Gunjyo"), ("#D05A6E", "Imayou"),
     ]
+    /// The 24 pastel-leaning colours before 2026-11-25, in their old order: a saved colour from that
+    /// list becomes the new colour in the same place, so every backup and source refreshes.
+    static let before = ["#90B44B", "#E83015", "#D19826", "#7B90D2", "#5DAC81", "#986DB2", "#2EA9DF", "#C1693C",
+                         "#E03C8A", "#3A8FB7", "#E98B2A", "#D0104C", "#DC9FB4", "#F596AA", "#B481BB", "#A5DEE4",
+                         "#81C7D4", "#7DB9DE", "#A8D8B9", "#86C166", "#F7D94C", "#FFB11B", "#FB966E", "#E87A90"]
+    static func current(_ hex: String) -> String {
+        if colors.contains(where: { $0.hex == hex }) { return hex }
+        return before.firstIndex(of: hex).map { colors[$0].hex } ?? hex
+    }
+
     /// A solid soft version (the colour mixed with white): the same in light and dark, never
     /// a see-through tint that a dark page muddies.
     static func soft(_ hex: String, white: Double = 0.3) -> Color {   // 0.45 read as pastel; 0.3 keeps the colour
