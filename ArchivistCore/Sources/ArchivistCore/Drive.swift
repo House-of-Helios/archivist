@@ -138,7 +138,7 @@ public enum ArchivistError: Error, CustomStringConvertible {
         switch self {
         case let .io(call, path, e): return "\(call) \(path): \(String(cString: strerror(e)))"
         case let .refused(why): return why
-        case let .changedDuringCopy(path): return "\(path) kept changing while it was copied; try again when it is closed"
+        case let .changedDuringCopy(path): return "\(path): in use, copied next backup"
         }
     }
 }

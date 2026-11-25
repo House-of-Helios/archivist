@@ -519,6 +519,15 @@ final class Runner {
         return o.bytesTotal > 0 ? Double(o.bytes) / Double(o.bytesTotal) : 0
     }
 
+    /// "6:15", "1 h 05 min", "40 s".
+    static func clock(_ t: TimeInterval) -> String {
+        let s = Int(t.rounded())
+        if s < 60 { return "\(max(s, 1)) s" }
+        if s < 3600 { return String(format: "%d:%02d", s / 60, s % 60) }
+        return String(format: "%d h %02d min", s / 3600, (s % 3600) / 60)
+    }
+    var elapsed: TimeInterval { Date().timeIntervalSince(started) }
+
     func etaWords(at now: Date) -> String {
         guard progress.stage == .copying else { return "Looking for changes…" }
         guard let left = remaining(at: now) else { return "Working out the time left…" }

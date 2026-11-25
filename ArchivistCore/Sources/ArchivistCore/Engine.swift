@@ -108,6 +108,8 @@ public final class Engine {
     private var stamp = ""
     private var newPaths = Set<String>()
     private var deadRunStarted: Double?
+    private var busy: [Entry] = []          // files that kept changing: tried again once at the end
+    private var retryingBusy = false
     public var onProgress: ((Progress) -> Void)?
     private var stopped = false
 
@@ -301,6 +303,10 @@ public final class Engine {
             report.pastFolder = retired > 0 ? pastFolder : nil
             return report
         }
+        if !busy.isEmpty && !isStopped {   // a file in use may be closed by now (an editor saving, git writing)
+            retryingBusy = true
+            runLane(busy, width: 1, cloneOK: cloneOK)
+        }
         for (e, first) in linkLater { link(e, to: firstOfInode[e.inode] ?? first) }
 
         // Folder dates and metadata last (writing files inside changed them), deepest first.
@@ -405,7 +411,10 @@ public final class Engine {
             let mtime = Double(after.st_mtimespec.tv_sec) + Double(after.st_mtimespec.tv_nsec) / 1e9
             if (e.kind == .file && after.st_size != e.size) || abs(mtime - e.mtime) > 0.000_001 {
                 unlink(temp)
-                if attempt == 4 { note(ArchivistError.changedDuringCopy(e.path)) }
+                if attempt == 4 {   // in use right now: once more at the end of the run, then the next backup
+                    lock.lock(); let later = !retryingBusy; if later { busy.append(e) }; lock.unlock()
+                    if !later { note(ArchivistError.changedDuringCopy(e.path)) }
+                }
                 continue
             }
             // Lock flags off on the temp; restored after the rename with the ACL.

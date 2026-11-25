@@ -76,7 +76,7 @@ struct JobView: View {
                                     .buttonStyle(.plain).foregroundStyle(Palette.soft)
                             }
                             ScrollView { Problems(list: runner.problems).frame(maxWidth: .infinity, alignment: .leading) }
-                            Text("Start the backup again to try these once more.").font(Typeface.text(12)).foregroundStyle(Palette.soft)
+                            Text("Files in use were tried again at the end; the next backup copies the rest.").font(Typeface.text(12)).foregroundStyle(Palette.soft)
                         }
                         .padding(24)
                         .frame(width: SettingsSheet.width).frame(maxHeight: min(420, g.size.height - 32))
@@ -288,11 +288,11 @@ struct SourcesPane: View {
                         .lineLimit(1)
                         .offset(y: 1.5)
                 }
-                if needed > 0 { Spacer() }
-                if !view.runner.running && !view.runner.problems.isEmpty {   // something failed: a click opens the list
+                if !view.runner.running && !view.runner.problems.isEmpty {   // something wasn't copied: a click opens the list
                     Button { NotificationCenter.default.post(name: .showProblems, object: nil) } label: { Emoji(name: "warning", size: 16) }
                         .buttonStyle(.plain).help("Some files weren't copied").offset(y: 1.5)
                 }
+                if needed > 0 { Spacer() }
                 if !job.sources.isEmpty {
                     (Text("\(job.sources.count) \(job.sources.count == 1 ? "item" : "items"), ")
                      + Text(bytes(total)).fontWeight(.semibold).foregroundColor(Palette.ink))
@@ -662,16 +662,27 @@ struct BottomBar: View {
                             .animation(.easeInOut(duration: 1), value: pace)
                             Text("Drive speed").font(Typeface.text(12)).foregroundStyle(Palette.soft)
                             Spacer()
-                            Emoji(name: icon, size: 14)
                             Text(word).font(Typeface.text(12)).foregroundStyle(pace >= 0.4 ? Palette.soft : Palette.warn)
+                            Emoji(name: icon, size: 14)   // at the edge: the word can change length, the icon stays put
                         }
                     }
-                    Text(r.stopping ? "Stopping…" : r.finishing ? "Finishing…"
-                         : r.running ? (estimating ? "Calculating time left…" : "\(Int(r.steadyFraction(at: tl.date) * 100))% done, \(r.etaWords(at: tl.date))")
-                         : (job.ready && view.destinationState == .present ? "Ready to start" : " "))
-                        .font(r.running && !estimating ? Typeface.number(12.5) : Typeface.text(12))
-                        .foregroundStyle(r.running ? Palette.ink : Palette.soft)
-                        .frame(maxWidth: .infinity)
+                    if r.running && !estimating && !r.stopping && !r.finishing, let left = r.remaining(at: tl.date) {
+                        // "~6:15 left  //  67% done  //  17:15 total": the percent sits on the app's middle.
+                        HStack(spacing: 0) {
+                            Text("~\(Runner.clock(left)) left  //  ").frame(maxWidth: .infinity, alignment: .trailing)
+                            Text("\(Int(r.steadyFraction(at: tl.date) * 100))% done").fontWeight(.semibold).fixedSize()
+                            Text("  //  \(Runner.clock(r.elapsed + left)) total").frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .font(Typeface.number(12.5)).foregroundStyle(Palette.ink)
+                        .padding(.horizontal, 150)   // clear of the speed meter and word at the ends
+                    } else {
+                        Text(r.stopping ? "Stopping…" : r.finishing ? "Finishing…"
+                             : r.running ? "Calculating time left…"
+                             : (job.ready && view.destinationState == .present ? "Ready to start" : " "))
+                            .font(Typeface.text(12))
+                            .foregroundStyle(r.running ? Palette.ink : Palette.soft)
+                            .frame(maxWidth: .infinity)
+                    }
                     }
                     .frame(height: 27)   // centred between the bar and the window's bottom edge
                 }
