@@ -185,7 +185,13 @@ final class JobStore {
             let live = job.sources.filter { !$0.skip }.compactMap { surveys[$0.id] }.filter(\.compared)
             planned = (live.reduce(0) { $0 + $1.toCopy }, live.reduce(0) { $0 + $1.bytesToCopy })
         }
-        runner(for: id).start(job, planned: planned) { [weak self] summary, state, past, total in
+        // Copied in the order shown: biggest folder first, so the bar fills left to right.
+        var ordered = job
+        ordered.sources = job.sources.enumerated().sorted { (a: (offset: Int, element: Source), b: (offset: Int, element: Source)) in
+            let x = surveys[a.element.id]?.bytes ?? -1, y = surveys[b.element.id]?.bytes ?? -1
+            return x != y ? x > y : a.offset < b.offset
+        }.map { $0.element }
+        runner(for: id).start(ordered, planned: planned) { [weak self] summary, state, past, total in
             guard let self, let i = self.jobs.firstIndex(where: { $0.id == id }) else { return }
             var j = self.jobs[i]
             j.lastResult = summary; j.lastState = state; j.lastPast = past ?? j.lastPast; j.lastRun = Date(); j.lastBytes = total

@@ -48,7 +48,7 @@ struct JobView: View {
                             .contentShape(Rectangle())
                             .onTapGesture { showingSettings = false }   // a click outside closes it
                         SettingsSheet(view: self, close: { showingSettings = false })
-                            .frame(width: min(760, g.size.width - 32), height: min(700, g.size.height - 32))   // never hangs past the window
+                            .frame(width: min(560, g.size.width - 32), height: min(700, g.size.height - 32))   // never hangs past the window
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                             .shadow(color: .black.opacity(0.25), radius: 20, y: 6)
                     }
@@ -110,6 +110,16 @@ struct JobView: View {
             if comps.count > 2, comps[1] == "Volumes", !FileManager.default.fileExists(atPath: "/Volumes/" + comps[2]) { return .driveMissing }
             return .folderMissing
         }.value
+    }
+
+    /// Biggest first (measured size), Exclude rows last; ones not measured yet keep their place.
+    var sortedSources: [Source] {
+        let j = job
+        return j.sources.enumerated().sorted { a, b in
+            if a.element.skip != b.element.skip { return !a.element.skip }   // Exclude rows at the bottom
+            let x = surveys[a.element.id]?.bytes ?? -1, y = surveys[b.element.id]?.bytes ?? -1
+            return x != y ? x > y : a.offset < b.offset
+        }.map(\.element)
     }
 
     /// When the sources were last walked: rechecks from file events and returning to the app wait 2 minutes.
@@ -228,7 +238,7 @@ struct SourcesPane: View {
         let job = view.job
         let total = job.sources.filter { !$0.skip }.compactMap { view.surveys[$0.id]?.bytes }.reduce(0, +)
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .center) {   // centred in a fixed row, like Destination's: the titles' tops line up
                 Text("Sources").font(Typeface.title(24)).foregroundStyle(Palette.ink)
                 AddButton(view: view)
                 Spacer()
@@ -237,6 +247,7 @@ struct SourcesPane: View {
                         .font(Typeface.text(13)).foregroundStyle(Palette.soft)
                 }
             }
+            .frame(height: 30)
             .padding(.horizontal, 28)
             .frame(height: Header.height, alignment: .bottom).padding(.bottom, Header.below)   // same box as Destination's
 
@@ -244,11 +255,17 @@ struct SourcesPane: View {
                 DropHint(text: "Drop folders or a drive here", action: view.chooseFolders)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ThinScroll {
-                    VStack(spacing: 0) {
-                        ForEach(job.sources) { s in
-                            SourceRow(view: view, source: s)
-                            Rectangle().fill(Palette.rule).frame(height: 1).padding(.leading, 76)
+                GeometryReader { g in
+                    // More rows than fit: stretch them a little so a whole number fills the view and the
+                    // last one's line meets the bottom bar (no sliver of a gap above it).
+                    let natural: CGFloat = 64, fit = max(1, (g.size.height / natural).rounded(.down))
+                    let rowH: CGFloat? = CGFloat(job.sources.count) > fit ? g.size.height / fit : nil
+                    ThinScroll {
+                        VStack(spacing: 0) {
+                            ForEach(view.sortedSources) { s in
+                                SourceRow(view: view, source: s).frame(height: rowH.map { $0 - 1 })
+                                Rectangle().fill(Palette.rule).frame(height: 1).padding(.leading, 76)
+                            }
                         }
                     }
                 }
@@ -368,12 +385,13 @@ struct DestinationPane: View {
         let d = view.drive(job.destination)
         let needed = job.sources.filter { !$0.skip }.compactMap { view.surveys[$0.id] }.filter(\.compared).reduce(Int64(0)) { $0 + $1.bytesToCopy }
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .center) {
                 Text("Destination").font(Typeface.title(24)).foregroundStyle(Palette.ink)
                 Spacer()
                 Button { NotificationCenter.default.post(name: .showSettings, object: nil) } label: { Emoji(name: "gear", size: 20) }
                     .buttonStyle(.plain).help("Settings: name, picture, schedule, drive type, delete")
             }
+            .frame(height: 30)
             .frame(height: Header.height, alignment: .bottom).padding(.bottom, Header.below)   // same box as Sources'
 
             if let path = job.destination, view.destinationState != .present {
@@ -555,7 +573,7 @@ struct BottomBar: View {
         let job = view.job
         // Real sizes only: until every source's size is known, a plain track instead of made-up chunks.
         let known = job.sources.filter { !$0.skip }.allSatisfy { view.surveys[$0.id] != nil }
-        let chunks = known ? job.sources.filter { !$0.skip }.map { (s: $0, b: max(view.surveys[$0.id]?.bytes ?? 1, 1)) } : []
+        let chunks = known ? view.sortedSources.filter { !$0.skip }.map { (s: $0, b: max(view.surveys[$0.id]?.bytes ?? 1, 1)) } : []
         let total = max(chunks.reduce(Int64(0)) { $0 + $1.b }, 1)
         TimelineView(.periodic(from: .now, by: view.runner.running && view.runner.remaining(at: .now) == nil ? 0.25 : 1)) { tl in
             let r = view.runner
@@ -756,20 +774,22 @@ struct SettingsSheet: View {
                         .buttonStyle(.plain).foregroundStyle(Palette.soft).help("Close")
                 }
 
-                HStack(alignment: .top, spacing: 28) {
-                    section("Picture") {
-                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(34), spacing: 4), count: 8), spacing: 4) {
+                HStack(alignment: .top, spacing: 32) {
+                    section("Icon") {
+                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(32), spacing: 4, alignment: .leading), count: 7),
+                                  alignment: .leading, spacing: 4) {
                             ForEach(Job.icons, id: \.self) { n in
                                 Button { view.edit { $0.icon = n; $0.lookChosen = true } } label: {
-                                    Emoji(name: n, size: 22).frame(width: 34, height: 34)
+                                    Emoji(name: n, size: 21).frame(width: 32, height: 32)
                                         .background(Circle().strokeBorder(n == job.icon ? Palette.ink : .clear, lineWidth: 2))
                                 }.buttonStyle(.plain)
                             }
                         }
+                        .fixedSize()
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    section("Colour") {
-                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(26), spacing: 10), count: 8), spacing: 10) {
+                    section("Background") {
+                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(26), spacing: 10, alignment: .leading), count: 5),
+                                  alignment: .leading, spacing: 10) {
                             ForEach(Nippon.colors, id: \.hex) { c in
                                 Button { view.edit { $0.color = c.hex; $0.lookChosen = true } } label: {
                                     Circle().fill(Nippon.color(c.hex)).frame(width: 26, height: 26)
@@ -777,11 +797,11 @@ struct SettingsSheet: View {
                                 }.buttonStyle(.plain).help(c.name)
                             }
                         }
+                        .fixedSize()
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                HStack(alignment: .top, spacing: 28) {
+                HStack(alignment: .top, spacing: 32) {
                     VStack(alignment: .leading, spacing: 22) {
                         section("Schedule") { ScheduleChooser(view: view) }
                         section("Threads") {
@@ -792,18 +812,23 @@ struct SettingsSheet: View {
                             .labelsHidden().fixedSize()
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize()
                     VStack(alignment: .leading, spacing: 22) {
                         section("Earlier versions") {
                             Toggle("Keep deleted files", isOn: Binding(get: { job.keepDeleted }, set: { v in view.edit { $0.keepDeleted = v } }))
-                            Toggle("Keep earlier versions of changed files", isOn: Binding(get: { job.keepChanged }, set: { v in view.edit { $0.keepChanged = v } }))
+                            Toggle("Keep earlier versions", isOn: Binding(get: { job.keepChanged }, set: { v in view.edit { $0.keepChanged = v } }))
                             HStack(spacing: 8) {
                                 Text("Remove after").foregroundStyle(Palette.soft)
                                 Picker("", selection: Binding(get: { job.keepDays ?? 0 }, set: { v in view.edit { $0.keepDays = v == 0 ? nil : v } })) {
                                     Text("30 days").tag(30); Text("90 days").tag(90); Text("1 year").tag(365); Text("Never").tag(0)
                                 }.labelsHidden().fixedSize()
                             }
-                            Toggle("Make room when the drive is nearly full (oldest first)", isOn: Binding(get: { job.makeRoom }, set: { v in view.edit { $0.makeRoom = v } }))
+                            Toggle(isOn: Binding(get: { job.makeRoom }, set: { v in view.edit { $0.makeRoom = v } })) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Make room when drive is full")
+                                    Text("Oldest first").font(Typeface.text(11.5)).foregroundStyle(Palette.soft)
+                                }
+                            }
                         }
                         section("Destination drive type") {
                             Picker("", selection: Binding(get: { job.destinationKind?.rawValue ?? "auto" },
@@ -815,7 +840,7 @@ struct SettingsSheet: View {
                             .pickerStyle(.radioGroup).labelsHidden()
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize()
                 }
 
                 VStack(spacing: 8) {

@@ -81,7 +81,7 @@ struct TitleStrip: View {
     var drawn = false   // snapshots: no traffic lights to clear
     var previewUpdate: UpdateInfo? = nil   // snapshots: show the pill
     @State private var firstShown: Job.ID?
-    private static let roomy = 5   // more backups than this: the others shrink to their picture, arrows appear
+    private static let roomy = 12   // more backups than this: arrows scroll the tabs
 
     var body: some View {
         let many = store.jobs.count > Self.roomy
@@ -89,7 +89,7 @@ struct TitleStrip: View {
             if many { arrow("chevron.left", by: -1) }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .bottom, spacing: 4) {
-                    ForEach(store.jobs) { job in tab(job, compact: many && job.id != selection).id(job.id) }
+                    ForEach(store.jobs) { job in tab(job, compact: job.id != selection).id(job.id) }   // only the open tab shows its name
                 }
                 .scrollTargetLayout()
             }
@@ -111,7 +111,7 @@ struct TitleStrip: View {
         .padding(.top, drawn ? 0 : 28)        // under the window's traffic lights, so the left edge can line up
         .frame(height: drawn ? 52 : 80, alignment: .bottom)
         .fixedSize(horizontal: false, vertical: true)
-        .background(alignment: .bottom) { Rectangle().fill(Palette.rule).frame(height: 1) }   // under the tabs: the open one covers it
+        .overlay(alignment: .bottom) { Rectangle().fill(Palette.rule).frame(height: 1) }   // drawn over the tabs: their bottom edge
     }
 
     /// A folder tab: rounded on top, square at the bottom, standing on the hairline. The open one is
@@ -127,7 +127,7 @@ struct TitleStrip: View {
                     if running, let r = store.runners[job.id] {
                         Circle().trim(from: 0, to: max(0.03, r.fraction(at: .now)))
                             .stroke(Palette.accent, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                            .rotationEffect(.degrees(-90)).padding(-3)
+                            .rotationEffect(.degrees(-90)).padding(1)   // hugs the picture
                     }
                 }
                 .help(running ? "Backing up" : "")
@@ -135,7 +135,7 @@ struct TitleStrip: View {
                 Text(job.title.isEmpty ? "Untitled" : job.title)
                     .font(Typeface.title(16))
                     .offset(y: -1.5)   // Bonum's letters sit low in their line: centre them on the picture
-                    .foregroundStyle(on ? Palette.ink : Palette.soft)
+                    .foregroundStyle(Color(red: 0.13, green: 0.11, blue: 0.09))   // dark on the light tab, in light and dark mode
                     .lineLimit(1)
                     .fixedSize()
             }
@@ -143,9 +143,6 @@ struct TitleStrip: View {
         .padding(.leading, 8).padding(.trailing, compact ? 8 : 14).padding(.top, 6).padding(.bottom, 7)
         .background(shape.fill(on ? Nippon.soft(job.color) : Nippon.soft(job.color).opacity(0.35)))
         .overlay(shape.stroke(on ? Palette.rule : .clear, lineWidth: 1))
-        .overlay(alignment: .bottom) {   // the open tab has no line under it
-            if on { Rectangle().fill(Nippon.soft(job.color)).frame(height: 2).padding(.horizontal, 1).offset(y: 1) }
-        }
         .zIndex(on ? 1 : 0)
         .contentShape(shape)
         .onTapGesture { selection = job.id }

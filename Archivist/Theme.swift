@@ -53,7 +53,7 @@ enum Nippon {
     ]
     /// A solid soft version (the colour mixed with white): the same in light and dark, never
     /// a see-through tint that a dark page muddies.
-    static func soft(_ hex: String, white: Double = 0.45) -> Color {
+    static func soft(_ hex: String, white: Double = 0.3) -> Color {   // 0.45 read as pastel; 0.3 keeps the colour
         let v = UInt32(hex.dropFirst(), radix: 16) ?? 0x5DAC81
         func mix(_ c: UInt32) -> Double { Double(c & 0xff) / 255 * (1 - white) + white }
         return Color(red: mix(v >> 16), green: mix(v >> 8), blue: mix(v))
