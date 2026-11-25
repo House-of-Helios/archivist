@@ -59,14 +59,14 @@ enum Snapshot {
             }.background(Palette.ground))
         }
         let screens: [(String, AnyView)] = [
-            ("backup", window(studio, Runner(), surveys, drives, space: true)),
+            ("backup", window(studio, { let r = Runner(); r.problems = ["copy Recipes/bread.md: Permission denied"]; return r }(), surveys, drives, space: true)),
             ("running", window(studio, running, surveys, drives, space: true)),
             ("new", window(photos, Runner(), [:], [:], space: false)),
             ("missing", window(studio, Runner(), surveys, drives, space: true, missing: true)),
             ("update", window(studio, Runner(), surveys, drives, space: true, update: update)),
         ]
         let sheets: [(String, AnyView, CGSize)] = [
-            ("settings", AnyView(SettingsSheet(view: JobView(storeOverride: store, jobID: studio.id, runnerOverride: Runner(), destinationState: .present, drives: drives, presetSurveys: surveys, space: nil, preset: true))), CGSize(width: 0, height: 760)),
+            ("settings", AnyView(SettingsSheet(view: JobView(storeOverride: store, jobID: studio.id, runnerOverride: Runner(), destinationState: .present, drives: drives, presetSurveys: surveys, space: nil, preset: true))), CGSize(width: SettingsSheet.width, height: 760)),
             ("update-sheet", AnyView(UpdateSheet(update: update, current: "0.0.1", onLater: {}, onInstall: {})), CGSize(width: 480, height: 420)),
         ]
         for (name, dark) in [("dark", true), ("light", false)] {

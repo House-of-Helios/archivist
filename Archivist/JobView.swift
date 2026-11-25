@@ -50,7 +50,7 @@ struct JobView: View {
                             .contentShape(Rectangle())
                             .onTapGesture { showingSettings = false }   // a click outside closes it
                         SettingsSheet(view: self, close: { showingSettings = false })
-                            .fixedSize(horizontal: true, vertical: false)   // as wide as its two columns
+                            .frame(width: SettingsSheet.width)   // fixed: choosing something never resizes it
                             .frame(height: min(700, g.size.height - 32))   // never hangs past the window
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                             .shadow(color: .black.opacity(0.25), radius: 20, y: 6)
@@ -255,8 +255,11 @@ struct SourcesPane: View {
                         .foregroundStyle(needed <= free ? Palette.soft : Palette.warn)
                         .lineLimit(1)
                         .offset(y: 1.5)
-                    Spacer()
                 }
+                if !view.runner.running && !view.runner.problems.isEmpty {   // which files, and why: a click lists them
+                    ProblemsLink(list: view.runner.problems).offset(y: 1.5)
+                }
+                if needed > 0 || (!view.runner.running && !view.runner.problems.isEmpty) { Spacer() }
                 if !job.sources.isEmpty {
                     (Text("\(job.sources.count) \(job.sources.count == 1 ? "item" : "items"), ")
                      + Text(bytes(total)).fontWeight(.semibold).foregroundColor(Palette.ink))
@@ -452,9 +455,6 @@ struct DestinationPane: View {
                         .font(Typeface.text(11.5, .semibold)).foregroundStyle(Palette.warn)
                         .fixedSize(horizontal: false, vertical: true).padding(.top, 8)
                 }
-                if !view.runner.running && !view.runner.problems.isEmpty {
-                    ProblemsLink(list: view.runner.problems).frame(maxWidth: .infinity).padding(.top, 6)
-                }
                 Button { NotificationCenter.default.post(name: .showSettings, object: nil) } label: {
                     HStack(spacing: 5) {
                         Emoji(name: "spiral_calendar", size: 13)
@@ -537,7 +537,7 @@ struct ProblemsLink: View {
         let words = [folders > 0 ? "\(folders) \(folders == 1 ? "folder" : "folders")" : nil,
                      files > 0 ? "\(files) \(files == 1 ? "file" : "files")" : nil].compactMap { $0 }
         Button(words.joined(separator: ", ") + " not copied") { open = true }
-            .buttonStyle(.plain).font(Typeface.text(12, .semibold)).foregroundStyle(Palette.warn)
+            .buttonStyle(.plain).font(Typeface.text(13, .semibold)).foregroundStyle(Palette.due)
             .popover(isPresented: $open) { Problems(list: list).padding(16).frame(width: 380) }
     }
 }
@@ -766,6 +766,8 @@ enum FolderWatch {
 /// The one place to change a backup: name, picture and colour, schedule, drive type,
 /// appearance, and deleting it.
 struct SettingsSheet: View {
+    static let column: CGFloat = 176
+    static let width: CGFloat = 26 + column + 32 + column + 26
     let view: JobView
     var close: () -> Void = {}
     @Environment(JobStore.self) private var store
@@ -787,8 +789,8 @@ struct SettingsSheet: View {
                         .buttonStyle(.plain).foregroundStyle(Palette.soft).help("Close")
                 }
 
-                // Two columns sized by Schedule and Earlier versions; Icon and Background sit over them.
-                Grid(alignment: .topLeading, horizontalSpacing: 40, verticalSpacing: 24) {
+                // Two fixed columns: nothing chosen inside can change the panel's width.
+                Grid(alignment: .topLeading, horizontalSpacing: 32, verticalSpacing: 24) {
                     GridRow {
                     section("Icon") {
                         LazyVGrid(columns: Array(repeating: GridItem(.fixed(32), spacing: 6, alignment: .leading), count: 4),
@@ -802,6 +804,7 @@ struct SettingsSheet: View {
                         }
                         .fixedSize()
                     }
+                    .frame(width: Self.column, alignment: .leading)
                     section("Background") {
                         LazyVGrid(columns: Array(repeating: GridItem(.fixed(32), spacing: 6, alignment: .leading), count: 4),
                                   alignment: .leading, spacing: 6) {
@@ -814,38 +817,35 @@ struct SettingsSheet: View {
                         }
                         .fixedSize()
                     }
+                    .frame(width: Self.column, alignment: .leading)
                     }
                     GridRow {
-                    VStack(alignment: .leading, spacing: 22) {
-                        section("Schedule") { ScheduleChooser(view: view) }
-                        section("Threads") {
-                            Picker("", selection: Binding(get: { job.threads ?? 0 }, set: { v in view.edit { $0.threads = v == 0 ? nil : v } })) {
-                                Text("Automatic").tag(0)
-                                ForEach([1, 2, 4, 8, 16], id: \.self) { Text("\($0)").tag($0) }
-                            }
-                            .labelsHidden().fixedSize()
-                        }
-                    }
-                    .fixedSize()
                     VStack(alignment: .leading, spacing: 22) {
                         section("Earlier versions") {
                             Toggle("Keep deleted files", isOn: Binding(get: { job.keepDeleted }, set: { v in view.edit { $0.keepDeleted = v } }))
                             Toggle("Keep earlier versions", isOn: Binding(get: { job.keepChanged }, set: { v in view.edit { $0.keepChanged = v } }))
-                            HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 4) {   // lined up with the toggles' words
                                 Text("Remove after").foregroundStyle(Palette.soft)
-                                // A plain menu sized to its words (the system picker kept room for the widest).
                                 Menu {
                                     ForEach([(30, "30 days"), (90, "90 days"), (365, "1 year"), (0, "Never")], id: \.0) { days, words in
                                         Button(words) { view.edit { $0.keepDays = days == 0 ? nil : days } }
                                     }
                                 } label: {
-                                    Text([30: "30 days", 90: "90 days", 365: "1 year"][job.keepDays ?? 0] ?? "Never")
+                                    HStack(spacing: 4) {
+                                        Text([30: "30 days", 90: "90 days", 365: "1 year"][job.keepDays ?? 0] ?? "Never")
+                                            .foregroundStyle(Palette.ink)
+                                        Spacer(minLength: 0)
+                                        Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.soft)
+                                    }
+                                    .padding(.horizontal, 8).frame(width: 84, height: 22)   // as wide as "90 days": the panel never changes width
+                                    .background(RoundedRectangle(cornerRadius: 6).fill(Palette.rule.opacity(0.6)))
                                 }
-                                .menuStyle(.button).fixedSize()
+                                .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()   // plain: the label is drawn as written
                             }
+                            .padding(.leading, 20).padding(.top, -2)
                             Toggle(isOn: Binding(get: { job.makeRoom }, set: { v in view.edit { $0.makeRoom = v } })) {
                                 VStack(alignment: .leading, spacing: 1) {
-                                    Text("Make room when\ndrive is full")
+                                    Text("Make room when full")
                                     Text("Oldest first").font(Typeface.text(11.5)).foregroundStyle(Palette.soft)
                                 }
                             }
@@ -860,7 +860,18 @@ struct SettingsSheet: View {
                             .pickerStyle(.radioGroup).labelsHidden()
                         }
                     }
-                    .fixedSize()
+                    .frame(width: Self.column, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 22) {
+                        section("Schedule") { ScheduleChooser(view: view) }
+                        section("Threads") {
+                            Picker("", selection: Binding(get: { job.threads ?? 0 }, set: { v in view.edit { $0.threads = v == 0 ? nil : v } })) {
+                                Text("Automatic").tag(0)
+                                ForEach([1, 2, 4, 8, 16], id: \.self) { Text("\($0)").tag($0) }
+                            }
+                            .labelsHidden().fixedSize()
+                        }
+                    }
+                    .frame(width: Self.column, alignment: .leading)
                     }
                 }
                 .frame(maxWidth: .infinity)
