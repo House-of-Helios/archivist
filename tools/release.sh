@@ -53,7 +53,8 @@ ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT/Archivist.zip"   # for the
 STAGE=$(mktemp -d); cp -R "$APP" "$STAGE/"; ln -s /Applications "$STAGE/Applications"
 hdiutil create -volname "Archivist" -srcfolder "$STAGE" -ov -format UDZO "$OUT/Archivist.dmg" >/dev/null
 rm -rf "$STAGE"
-tools/sign.sh "$OUT/Archivist.dmg" >/dev/null 2>&1 || { echo "❌ couldn't sign the DMG"; exit 1; }
+# The DMG stays unsigned: Gatekeeper rejects a disk image signed by a certificate Apple does
+# not know (a second "Open Anyway"), but simply mounts an unsigned one. The app inside is signed.
 (cd "$OUT" && shasum -a 256 Archivist.dmg > Archivist.dmg.sha256)
 (cd "$OUT" && shasum -a 256 Archivist.zip > Archivist.zip.sha256)
 SHA=$(cut -d' ' -f1 "$OUT/Archivist.zip.sha256")
