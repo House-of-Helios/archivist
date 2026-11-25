@@ -51,6 +51,7 @@ struct RootView: View {
             if store.jobs.isEmpty { store.add() }
             selection = selection ?? store.jobs.first?.id
             DevLog.write("app open: \(store.jobs.count) backups")
+            Scheduler.sync(store.jobs)   // a new build re-registers the helper (or removes a stale one)
             #if DEBUG
             DevControl.start(store) { selection = $0 }
             #endif

@@ -11,14 +11,29 @@ enum Scheduler {
     static let plist = "com.houseofhelios.archivist.scheduler.plist"
     static var agent: SMAppService { SMAppService.agent(plistName: plist) }
 
-    /// Registered while any backup has a schedule; unregistered when none has.
+    /// Registered while any backup has a schedule; unregistered when none has. Only the window
+    /// does this: the helper itself never touches its own registration.
+    ///
+    /// macOS ties a registered agent to the signature of the build that registered it ("launch
+    /// constraint"). A different build (an update, a dev copy) is then killed at every start with
+    /// "Code Signature Invalid", which shows as "Archivist quit unexpectedly". So whenever this
+    /// build differs from the one that registered, the agent is registered again.
     static func sync(_ jobs: [Job]) {
+        guard !requested else { return }
         let wanted = jobs.contains { $0.schedule != .byHand }
+        let build = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "") + " " + Bundle.main.bundlePath
+        let key = "schedulerRegisteredBy"
         do {
-            if wanted && agent.status != .enabled { try agent.register() }
-            if !wanted && agent.status == .enabled { try agent.unregister() }
+            if agent.status != .notRegistered && (!wanted || UserDefaults.standard.string(forKey: key) != build) {
+                try agent.unregister()
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+            if wanted && agent.status != .enabled {
+                try agent.register()
+                UserDefaults.standard.set(build, forKey: key)
+            }
         } catch {
-            NSLog("Archivist scheduler: \(error)")
+            DevLog.write("scheduler: \(error)")
         }
     }
 
@@ -38,6 +53,7 @@ enum Scheduler {
     static func runDue() {
         let store = JobStore()
         let now = Date()
+        guard store.jobs.contains(where: { $0.schedule != .byHand }) else { return }   // nothing scheduled: nothing to do
         // A laptop must not sleep, and a background process must not be napped, mid-copy.
         let awake = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled, .userInitiated], reason: "Scheduled backup")
         defer { ProcessInfo.processInfo.endActivity(awake) }
