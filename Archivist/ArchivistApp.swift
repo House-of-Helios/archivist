@@ -166,12 +166,13 @@ struct TitleStrip: View {
 }
 
 struct PrimaryButton: ButtonStyle {
+    static let height: CGFloat = 32
     @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(Typeface.text(14, .semibold))
             .foregroundStyle(Palette.onAccent)
-            .padding(.horizontal, 22).padding(.vertical, 11)
+            .padding(.horizontal, 22).frame(height: Self.height)   // one height for every button: Start and Stop swap without a jump
             .background(Capsule().fill(Palette.accent.opacity(enabled ? (configuration.isPressed ? 0.8 : 1) : 0.35)))
             .contentShape(Capsule())
     }
@@ -182,7 +183,7 @@ struct QuietButton: ButtonStyle {
         configuration.label
             .font(Typeface.text(13, .medium))
             .foregroundStyle(Palette.ink.opacity(configuration.isPressed ? 0.6 : 0.9))
-            .padding(.horizontal, 14).padding(.vertical, 8)
+            .padding(.horizontal, 14).frame(height: PrimaryButton.height)
             .background(Capsule().strokeBorder(Palette.rule, lineWidth: 1))
             .contentShape(Capsule())
     }
