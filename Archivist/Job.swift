@@ -382,10 +382,17 @@ final class Runner {
         pace = nil
         paceStart = Date()
         paceKey = "pace:" + (job.destination.map { p in let c = (p as NSString).pathComponents; return c.count > 2 && c[1] == "Volumes" ? c[2] : "/" } ?? "")
-        let d = UserDefaults.standard   // this drive's speeds from earlier runs, or a spinning disk's until measured
-        secPerSmall = d.double(forKey: paceKey + ".sps").nonZero ?? 1.0 / 40
-        secPerMB = d.double(forKey: paceKey + ".spm").nonZero ?? 1.0 / 20   // 20 MB/s: a tired spinning disk, not a fresh one
+        // This drive's past runs (by its volume UUID), or a tired spinning disk's speeds until it has some.
+        driveKey = job.destination.map { DriveMemories.key(for: $0) } ?? ""
+        memory = DriveMemories.load()[driveKey] ?? DriveMemory(name: job.destination.map { DriveMemories.name(for: $0) } ?? "")
+        secPerSmall = memory.secondsPerSmallFile ?? 1.0 / 40
+        secPerMB = memory.secondsPerMB ?? 1.0 / 20   // 20 MB/s: a tired spinning disk, not a fresh one
         measuredSmall = false; measuredBig = false
+        phase = (0, 0, 0, 0); phaseTick = nil
+        // A drive with a past gives a time at once: no "Calculating" wait.
+        if !memory.runs.isEmpty && (plannedSmall > 0 || plannedBig > 0) {
+            etaAnchor = (Date(), memory.estimate(smallFiles: plannedSmall, bigMB: Double(plannedBig) / 1e6, defaults: (1.0 / 40, 1.0 / 20)))
+        }
         let runs = job.sources.filter { !$0.skip }.compactMap { s in job.target(for: s).map { (s, $0) } }
         if let d = job.destination, let root = job.pastRoot {   // earlier names (_Past, _Archive) -> _📚archive, once
             for old in Names.legacyPasts where !FileManager.default.fileExists(atPath: root) {
@@ -475,9 +482,15 @@ final class Runner {
                 if !removed.isEmpty { DevLog.write("earlier versions removed: \(removed.joined(separator: ", "))") }
             }
             DispatchQueue.main.async {
-                let d = UserDefaults.standard   // what this drive did, for the next estimate
-                if self.measuredSmall { d.set(self.secPerSmall, forKey: self.paceKey + ".sps") }
-                if self.measuredBig { d.set(self.secPerMB, forKey: self.paceKey + ".spm") }
+                // What this drive did, for the next estimate: only a backup that ran to its end.
+                if !(stopped || self.stopRequested), !self.driveKey.isEmpty {
+                    self.memory.add(.init(smallFiles: self.doneSmall, bigMB: Double(self.doneBig) / 1e6,
+                                          looking: self.phase.looking, small: self.phase.small, big: self.phase.big, finishing: self.phase.finishing))
+                    DriveMemories.save(self.memory, for: self.driveKey)
+                    DevLog.write(String(format: "drive memory %@: looking %.0f s, small %.0f s (%d files), big %.0f s (%.0f MB), finishing %.0f s",
+                                        self.memory.name, self.phase.looking, self.phase.small, self.doneSmall, self.phase.big,
+                                        Double(self.doneBig) / 1e6, self.phase.finishing))
+                }
                 ProcessInfo.processInfo.endActivity(awake)
                 self.problems = problems
                 self.running = false
@@ -511,6 +524,11 @@ final class Runner {
     @ObservationIgnored private var secPerSmall = 0.03
     @ObservationIgnored private var secPerMB = 0.03
     @ObservationIgnored private var measuredSmall = false
+    @ObservationIgnored private var driveKey = ""
+    @ObservationIgnored private var memory = DriveMemory(name: "")
+    /// Seconds spent in each stretch of this run, for the drive's memory.
+    @ObservationIgnored private var phase = (looking: 0.0, small: 0.0, big: 0.0, finishing: 0.0)
+    @ObservationIgnored private var phaseTick: (date: Date, small: Int, big: Int64)?
     @ObservationIgnored private var measuredBig = false
     @ObservationIgnored private var lastStep: (date: Date, files: Int, bytes: Int64)?
     @ObservationIgnored private var lastLog = Date.distantPast
@@ -581,7 +599,10 @@ final class Runner {
         let smallLeft = Double(max(0, max(plannedSmall, doneSmall + progress.smallTotal) - small))
         let bigLeft = max(0, Double(max(plannedBig, doneBig + progress.bigBytesTotal)) / 1e6 - big)
         let a = smallLeft * secPerSmall, bTime = bigLeft * secPerMB
-        let raw = both ? max(a, bTime) : a + bTime   // a spinning disk does one after the other
+        let copyTime = both ? max(a, bTime) : a + bTime   // a spinning disk does one after the other
+        // Folder dates and the final flush, as this drive took them before.
+        let files = Double(max(plannedSmall, doneSmall + progress.smallTotal)) + max(1, Double(max(plannedBig, doneBig + progress.bigBytesTotal)) / 50e6)
+        let raw = copyTime + (finishing ? 0 : files * (memory.finishingPerFile ?? 0))
         eta = eta.map { $0 * 0.8 + raw * 0.2 } ?? raw     // calm: no jumping minute to minute
         // The shown clock never ticks up: a shorter estimate eases in; a slightly longer one holds
         // the clock still; one over 25% longer jumps once (crawling up second by second felt broken).
@@ -593,6 +614,17 @@ final class Runner {
 
     private func tick(_ p: ArchivistCore.Progress) {
         progress = p
+        // Which stretch this moment belongs to: looking, small files, big files, or finishing.
+        let now = Date(), small = doneSmall + p.smallDone, big = doneBig + p.bigBytesDone + p.inFlight
+        if let t = phaseTick {
+            let dt = now.timeIntervalSince(t.date)
+            if p.stage == .looking { phase.looking += dt }
+            else if finishing { phase.finishing += dt }
+            else if small > t.small && big == t.big { phase.small += dt }
+            else if big > t.big && small == t.small { phase.big += dt }
+            else { phase.small += dt / 2; phase.big += dt / 2 }
+        }
+        phaseTick = (now, small, big)
         if p.stage == .copying { updateETA(p) }
         if Date().timeIntervalSince(lastLog) >= 5 {
             lastLog = Date()
@@ -621,3 +653,34 @@ final class Runner {
 }
 
 extension Double { var nonZero: Double? { self > 0 ? self : nil } }
+
+/// Every destination drive's memory, in one small file beside the jobs (keyed by volume UUID).
+enum DriveMemories {
+    static var file: URL { JobStore.dataDirectory.appendingPathComponent("drives.json") }
+
+    static func key(for path: String) -> String {
+        var url = URL(fileURLWithPath: path)
+        while !FileManager.default.fileExists(atPath: url.path) && url.path != "/" { url.deleteLastPathComponent() }
+        let v = try? url.resourceValues(forKeys: [.volumeUUIDStringKey, .volumeNameKey])
+        return v?.volumeUUIDString ?? v?.volumeName ?? ""
+    }
+
+    static func name(for path: String) -> String {
+        var url = URL(fileURLWithPath: path)
+        while !FileManager.default.fileExists(atPath: url.path) && url.path != "/" { url.deleteLastPathComponent() }
+        return (try? url.resourceValues(forKeys: [.volumeNameKey]))?.volumeName ?? url.lastPathComponent
+    }
+
+    static func load() -> [String: DriveMemory] {
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        return (try? Data(contentsOf: file)).flatMap { try? dec.decode([String: DriveMemory].self, from: $0) } ?? [:]
+    }
+
+    static func save(_ m: DriveMemory, for key: String) {
+        var all = load()
+        all[key] = m
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601; enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let d = try? enc.encode(all) { try? d.write(to: file, options: .atomic) }
+    }
+}
