@@ -538,6 +538,33 @@ final class EngineTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: dst + "/d49/f.txt"))
     }
 
+    func testRelativePathsFinish() throws {
+        write("a.txt", "a")
+        let cwd = FileManager.default.currentDirectoryPath
+        FileManager.default.changeCurrentDirectoryPath(testRoot)
+        defer { FileManager.default.changeCurrentDirectoryPath(cwd) }
+        let rel = { (p: String) in String(p.dropFirst(testRoot.count + 1)) }
+        let r = try Engine(source: rel(src), destination: rel(dst) + "/rel", options: Options()).run()   // looped forever before
+        XCTAssertEqual(r.copied, 1)
+    }
+
+    func testWhatADeadRunWroteIsCopiedAgain() throws {
+        write("a.txt", "good")
+        write("b.txt", "good")
+        _ = try backup()
+        sleep(3)   // the dead run starts later than the good backup
+        // A run that died: its lock is left, and it wrote a.txt half (right size and date, wrong bytes).
+        try FileManager.default.createDirectory(atPath: dst + "/.archivist", withIntermediateDirectories: true)
+        try "999999\n".write(toFile: dst + "/.archivist/run.lock", atomically: false, encoding: .utf8)
+        let h = open(dst + "/a.txt", O_WRONLY); _ = "XXXX".withCString { Darwin.write(h, $0, 4) }; close(h)
+        var t = [timespec](repeating: timespec(tv_sec: 1_000_000_000, tv_nsec: 0), count: 2)
+        var st = stat(); lstat(src + "/a.txt", &st); t[0] = st.st_mtimespec; t[1] = st.st_mtimespec
+        utimensat(AT_FDCWD, dst + "/a.txt", &t, AT_SYMLINK_NOFOLLOW)
+        let r = try backup()
+        XCTAssertEqual(try String(contentsOfFile: dst + "/a.txt", encoding: .utf8), "good", "the dead run's half file is copied again")
+        XCTAssertEqual(r.copied, 1, "only what the dead run touched")
+    }
+
     func testLanesFollowTheMeasurements() {
         XCTAssertEqual(Lanes.choose(source: .ssd, destination: .ssd), Lanes(small: 8, big: 2, together: true, diskOrder: false))
         XCTAssertEqual(Lanes.choose(source: .spinning, destination: .ssd), Lanes(small: 1, big: 1, together: false, diskOrder: true))

@@ -131,13 +131,13 @@ struct JobView: View {
         // Sizes first (local, quick): the bar and rows are right at once; then the comparison
         // with the destination, which can be slow on a busy or spinning drive.
         for s in j.sources where store.surveys[s.id] == nil {
-            if let size = await Task.detached(priority: .utility, operation: { try? Survey.size(of: s.readPath, excluded: j.excluded(in: s), patterns: s.namesLeftOut) }).value {
+            if let size = await Task.detached(priority: .background, operation: { quiet(); return try? Survey.size(of: s.readPath, excluded: j.excluded(in: s), patterns: s.namesLeftOut) }).value {
                 store.surveys[s.id] = size
             }
         }
         for s in j.sources where !s.skip {   // an Exclude row is never compared: it isn't copied
             let target = j.target(for: s) ?? "/nonexistent-archivist-destination"
-            if let full = await Task.detached(priority: .utility, operation: { try? Survey.of(source: s.readPath, destination: target, excluded: j.excluded(in: s), patterns: s.namesLeftOut) }).value {
+            if let full = await Task.detached(priority: .background, operation: { quiet(); return try? Survey.of(source: s.readPath, destination: target, excluded: j.excluded(in: s), patterns: s.namesLeftOut) }).value {
                 store.surveys[s.id] = full
             }
         }
@@ -640,6 +640,12 @@ func kindWords(_ d: Drive) -> String {
     case .unknown: return "Probably spinning, \(fs)"
     case .network: return "Network drive, \(fs)"
     }
+}
+
+/// Measuring sources is housekeeping: background CPU (efficiency cores) and throttled disk reads,
+/// the way Spotlight and Time Machine walk a disk, so the Mac never feels it.
+func quiet() {
+    setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_THREAD, IOPOL_THROTTLE)
 }
 
 func bytes(_ n: Int64) -> String { ByteCountFormatter.string(fromByteCount: n, countStyle: .file) }

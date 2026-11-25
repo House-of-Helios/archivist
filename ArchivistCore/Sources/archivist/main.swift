@@ -44,6 +44,9 @@ case "copy":
         switch args[i] {
         case "--exclude": opts.excluded.insert(value().trimmingCharacters(in: CharacterSet(charactersIn: "/")))
         case "--dry-run": opts.dryRun = true
+        case "--barrier": opts.barrier = true
+        case "--temp-all": opts.directNew = false
+        case "--callback-all": opts.callbackFrom = 0
         case "--source-kind": opts.sourceKind = DriveKind(rawValue: value()) ?? { fail("unknown kind") }()
         case "--destination-kind": opts.destinationKind = DriveKind(rawValue: value()) ?? { fail("unknown kind") }()
         case "--lanes":

@@ -6,6 +6,7 @@ public struct Changes: Sendable {
     public var makeDirs: [Entry] = []        // folders missing at the destination
     public var retire: [String] = []         // destination paths to move into _Archive (gone or replaced by another kind)
     public var unchanged = 0
+    public var new = Set<String>()           // copies with nothing at the destination yet
     public var dirs: [Entry] = []            // every source folder (its dates are set at the end)
 
     public var bytes: Int64 { copy.reduce(0) { $0 + $1.size } }
@@ -37,6 +38,7 @@ public enum Compare {
                     continue
                 }
                 if let d, d.kind != s.kind { c.retire.append(s.path) }
+                if d == nil { c.new.insert(s.path) }
                 c.copy.append(s)
             case .other:
                 continue // sockets, FIFOs, devices: never copied

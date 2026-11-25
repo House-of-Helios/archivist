@@ -42,6 +42,14 @@ public struct Options: Sendable {
     /// on a spinning or SMR drive each full flush empties the drive's whole cache. Earlier
     /// sources are still ordered by their write barriers (no half files after a crash).
     public var finalFlush = true
+    /// A write barrier per batch of 64 files. Off: on a spinning disk each one is a journal flush
+    /// and head moves (HFS+ image: 1.95 s vs 1.5 s for 3,000 files; ditto 0.8 s). Crash safety comes
+    /// from the run lock instead: a run that died has everything it wrote copied again.
+    public var barrier = false
+    /// A file new to the destination is written at its own name: nothing good can be lost there,
+    /// and a half file from a crash is copied again (run lock). Replacements still go temp → rename.
+    public var directNew = true
+    public var callbackFrom: Int64 = 8 << 20  // files this big get the Stop callback (bench switch)
     /// Earlier versions. keepDeleted off: a file gone from the source is removed from the backup
     /// (a mirror). keepChanged off: a changed file is replaced in place.
     public var keepDeleted = true
@@ -97,6 +105,8 @@ public final class Engine {
     private var copied = 0
     private var copiedBytes: Int64 = 0
     private var stamp = ""
+    private var newPaths = Set<String>()
+    private var deadRunStarted: Double?
     public var onProgress: ((Progress) -> Void)?
     private var stopped = false
 
@@ -105,8 +115,9 @@ public final class Engine {
     var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
 
     public init(source: String, destination: String, options: Options = Options()) {
-        self.source = (source as NSString).standardizingPath
-        self.destination = (destination as NSString).standardizingPath
+        // Absolute, always: a relative path has no "/" to stop the overlap walk at.
+        self.source = URL(fileURLWithPath: source).standardizedFileURL.path
+        self.destination = URL(fileURLWithPath: destination).standardizedFileURL.path
         self.options = options
     }
 
@@ -170,6 +181,14 @@ public final class Engine {
             (path as NSString).lastPathComponent.range(of: "^\\" + Names.tempPrefix + "[0-9A-F]{8}$", options: .regularExpression) != nil
         }
         if !options.dryRun { for e in dstEntries where isTemp(e.path) { unlink(destination + "/" + e.path) } }
+        var suspect = Set<String>()
+        if let since = deadRunStarted {   // a run died mid-way: its files are suspect until copied again
+            for e in dstEntries where e.kind == .file {
+                var st = stat()
+                if lstat(destination + "/" + e.path, &st) == 0 && Double(st.st_ctimespec.tv_sec) >= since { suspect.insert(e.path) }
+            }
+            dstEntries.removeAll { suspect.contains($0.path) }
+        }
         dstEntries.removeAll { isTemp($0.path) }
 
         var changes = Compare.changes(source: srcEntries, destination: dstEntries,
@@ -233,6 +252,7 @@ public final class Engine {
         for dir in Set((changes.copy.map(\.path) + changes.retire).map { ($0 as NSString).deletingLastPathComponent }) {
             allowWriting(destination + "/" + dir)
         }
+        newPaths = changes.new.subtracting(suspect)   // something is there: replace it via temp → rename, never in place
         progress.filesTotal = changes.copy.count
         progress.bytesTotal = changes.bytes
         progress.stage = .copying
@@ -337,8 +357,9 @@ public final class Engine {
         // files it is extra work per file for nothing.
         flags |= cloneOK ? COPYFILE_CLONE : (e.size >= 1 << 20 ? COPYFILE_DATA_SPARSE : 0)   // probe: CLONE's fallback drops holes
 
-        for attempt in 1...3 {
-            let temp = dir + "/" + Names.tempPrefix + UUID().uuidString.prefix(8)
+        var direct = options.directNew && newPaths.contains(e.path)
+        for attempt in 1...4 {
+            let temp = direct ? target : dir + "/" + Names.tempPrefix + UUID().uuidString.prefix(8)
             report(current: e.path)
             // A status callback lets Stop cut a file mid-copy (COPYFILE_QUIT); its temp is removed,
             // never renamed, so nothing half-copied is kept.
@@ -349,10 +370,21 @@ public final class Engine {
                 guard let ctx else { return COPYFILE_CONTINUE }
                 return Unmanaged<Engine>.fromOpaque(ctx).takeUnretainedValue().isStopped ? COPYFILE_QUIT : COPYFILE_CONTINUE
             }
-            copyfile_state_set(state, UInt32(COPYFILE_STATE_STATUS_CB), unsafeBitCast(cb, to: UnsafeRawPointer.self))
-            copyfile_state_set(state, UInt32(COPYFILE_STATE_STATUS_CTX), me)
-            if copyfile(s, temp, state, copyfile_flags_t(flags)) != 0 {
+            // Only on big files: a small one is done in a blink anyway (measured: the callback itself
+            // costs little; the per-batch flush was the cost).
+            if e.size >= options.callbackFrom {
+                copyfile_state_set(state, UInt32(COPYFILE_STATE_STATUS_CB), unsafeBitCast(cb, to: UnsafeRawPointer.self))
+                copyfile_state_set(state, UInt32(COPYFILE_STATE_STATUS_CTX), me)
+            }
+            // copyfile reads and writes in the destination's block size (4–8 KB on HFS+): a 64 KB
+            // file took 8–16 trips through the kernel, 60% of the time per small file (sample).
+            // One buffer of up to 1 MB: a small file goes in one read and one write.
+            var bsize = UInt32(min(max(e.size, 4096), 1 << 20))
+            copyfile_state_set(state, UInt32(COPYFILE_STATE_BSIZE), &bsize)
+            // Straight to its own name only if nothing is there (EXCL): never over a file that appeared.
+            if copyfile(s, temp, state, copyfile_flags_t(flags | (direct ? COPYFILE_EXCL : 0))) != 0 {
                 let err = errno
+                if direct && err == EEXIST { direct = false; continue }   // not ours: go the temp → rename way
                 unlink(temp)
                 if err == ENOSPC || err == EDQUOT {   // the destination filled up: stop, don't fail file after file
                     if !isStopped { note(ArchivistError.refused("The destination is full; stopped.")) }
@@ -368,7 +400,7 @@ public final class Engine {
             let mtime = Double(after.st_mtimespec.tv_sec) + Double(after.st_mtimespec.tv_nsec) / 1e9
             if (e.kind == .file && after.st_size != e.size) || abs(mtime - e.mtime) > 0.000_001 {
                 unlink(temp)
-                if attempt == 3 { note(ArchivistError.changedDuringCopy(e.path)) }
+                if attempt == 4 { note(ArchivistError.changedDuringCopy(e.path)) }
                 continue
             }
             // Lock flags off on the temp; restored after the rename with the ACL.
@@ -401,16 +433,16 @@ public final class Engine {
     /// made an SMR drive 2x slower than ditto (race 2). One full flush ends the run.
     private func commit(_ batch: inout Batch) {
         guard !batch.files.isEmpty else { return }
-        if let fd = batch.files.first(where: { $0.fd >= 0 })?.fd, fcntl(fd, F_BARRIERFSYNC) != 0 { fsync(fd) }
+        if options.barrier, let fd = batch.files.first(where: { $0.fd >= 0 })?.fd, fcntl(fd, F_BARRIERFSYNC) != 0 { fsync(fd) }
         for f in batch.files {
             if f.fd >= 0 { close(f.fd) }
             let target = destination + "/" + f.entry.path
             var st = stat()
-            if lstat(target, &st) == 0 && options.keepChanged && !retire(f.entry.path, gone: false) {   // off: the rename replaces it
+            if f.temp != target, lstat(target, &st) == 0 && options.keepChanged && !retire(f.entry.path, gone: false) {   // off: the rename replaces it
                 unlink(f.temp)   // the old version could not be archived: it stays, this copy waits for the next run
                 continue
             }
-            if rename(f.temp, target) != 0 {
+            if f.temp != target, rename(f.temp, target) != 0 {
                 note(ArchivistError.io("rename", target, errno))
                 unlink(f.temp)
                 continue
@@ -523,7 +555,12 @@ public final class Engine {
         func id(_ p: String) -> (UInt32, UInt64)? { var st = stat(); return stat(p, &st) == 0 ? (UInt32(st.st_dev), st.st_ino) : nil }
         func ancestors(_ p: String) -> [String] {
             var out: [String] = [], cur = (p as NSString).standardizingPath
-            while true { out.append(cur); if cur == "/" { break }; cur = (cur as NSString).deletingLastPathComponent }
+            while true {
+                out.append(cur)
+                let up = (cur as NSString).deletingLastPathComponent
+                if cur == "/" || up == cur || up.isEmpty { break }
+                cur = up
+            }
             return out
         }
         func inside(_ a: String, _ b: String) -> Bool {   // a is b or lies under b
@@ -554,6 +591,10 @@ public final class Engine {
                kill(pid, 0) == 0 || errno == EPERM {
                 throw ArchivistError.refused("Another Archivist run (pid \(pid)) is copying to this destination.")
             }
+            // The dead run started when its lock was made: whatever it wrote since then may not
+            // have reached the platter (no flush per file), so this run copies it again.
+            var st = stat()
+            if lstat(path, &st) == 0 { deadRunStarted = Double(st.st_birthtimespec.tv_sec) - 2 }
             unlink(path)
         }
         throw ArchivistError.io("lock", path, errno)
