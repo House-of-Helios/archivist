@@ -37,8 +37,8 @@ targets:
       path: Archivist/Info.plist
       properties:
         # The version lives here: xcodegen rewrites Info.plist from this block.
-        CFBundleShortVersionString: "0.0.20"
-        CFBundleVersion: "20"
+        CFBundleShortVersionString: "0.0.21"
+        CFBundleVersion: "21"
         CFBundleDisplayName: Archivist
         LSMinimumSystemVersion: "14.0"
         NSHumanReadableCopyright: "House of Helios, GPL-3.0"

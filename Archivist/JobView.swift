@@ -29,6 +29,7 @@ struct JobView: View {
     }
 
     @State private var showingSettings = false
+    @State private var showingProblems = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -60,7 +61,38 @@ struct JobView: View {
                 .transition(.opacity)
             }
         }
+        .overlay {
+            if showingProblems {
+                GeometryReader { g in
+                    ZStack {
+                        Color.black.opacity(0.35).ignoresSafeArea().contentShape(Rectangle())
+                            .onTapGesture { showingProblems = false }
+                        VStack(alignment: .leading, spacing: 14) {
+                            HStack {
+                                Emoji(name: "warning", size: 22)
+                                Text("Not copied").font(Typeface.title(20)).foregroundStyle(Palette.ink)
+                                Spacer()
+                                Button { showingProblems = false } label: { Image(systemName: "xmark").font(.system(size: 13, weight: .semibold)) }
+                                    .buttonStyle(.plain).foregroundStyle(Palette.soft)
+                            }
+                            ScrollView { Problems(list: runner.problems).frame(maxWidth: .infinity, alignment: .leading) }
+                            Text("Start the backup again to try these once more.").font(Typeface.text(12)).foregroundStyle(Palette.soft)
+                        }
+                        .padding(24)
+                        .frame(width: SettingsSheet.width).frame(maxHeight: min(420, g.size.height - 32))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .background(Palette.ground)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .shadow(color: .black.opacity(0.25), radius: 20, y: 6)
+                    }
+                    .frame(width: g.size.width, height: g.size.height)
+                }
+                .transition(.opacity)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showProblems)) { _ in showingProblems = true }
         .animation(.easeOut(duration: 0.15), value: showingSettings)
+        .animation(.easeOut(duration: 0.15), value: showingProblems)
         .onReceive(NotificationCenter.default.publisher(for: .showSettings)) { _ in showingSettings = true }
         .onExitCommand { showingSettings = false }
         .task(id: refreshKey) { await refresh() }
@@ -256,10 +288,11 @@ struct SourcesPane: View {
                         .lineLimit(1)
                         .offset(y: 1.5)
                 }
-                if !view.runner.running && !view.runner.problems.isEmpty {   // which files, and why: a click lists them
-                    ProblemsLink(list: view.runner.problems).offset(y: 1.5)
+                if needed > 0 { Spacer() }
+                if !view.runner.running && !view.runner.problems.isEmpty {   // something failed: a click opens the list
+                    Button { NotificationCenter.default.post(name: .showProblems, object: nil) } label: { Emoji(name: "warning", size: 16) }
+                        .buttonStyle(.plain).help("Some files weren't copied").offset(y: 1.5)
                 }
-                if needed > 0 || (!view.runner.running && !view.runner.problems.isEmpty) { Spacer() }
                 if !job.sources.isEmpty {
                     (Text("\(job.sources.count) \(job.sources.count == 1 ? "item" : "items"), ")
                      + Text(bytes(total)).fontWeight(.semibold).foregroundColor(Palette.ink))
@@ -529,18 +562,6 @@ struct Missing: View {
     }
 }
 
-struct ProblemsLink: View {
-    let list: [String]
-    @State private var open = false
-    var body: some View {
-        let folders = list.filter { $0.hasPrefix("Folder ") }.count, files = list.count - folders
-        let words = [folders > 0 ? "\(folders) \(folders == 1 ? "folder" : "folders")" : nil,
-                     files > 0 ? "\(files) \(files == 1 ? "file" : "files")" : nil].compactMap { $0 }
-        Button(words.joined(separator: ", ") + " not copied") { open = true }
-            .buttonStyle(.plain).font(Typeface.text(13, .semibold)).foregroundStyle(Palette.due)
-            .popover(isPresented: $open) { Problems(list: list).padding(16).frame(width: 380) }
-    }
-}
 
 /// Free space on the destination, and whether this backup fits.
 struct SpaceBar: View {
@@ -726,8 +747,6 @@ struct Problems: View {
     let list: [String]
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(list.count == 1 ? "One thing could not be copied" : "\(list.count) things could not be copied")
-                .font(Typeface.text(13, .semibold)).foregroundStyle(Palette.warn)
             ForEach(list.prefix(8), id: \.self) { Text($0).font(Typeface.text(12)).foregroundStyle(Palette.soft).fixedSize(horizontal: false, vertical: true) }
             if list.count > 8 { Text("and \(list.count - 8) more").font(Typeface.text(12)).foregroundStyle(Palette.soft) }
             if list.contains(where: { $0.contains("Operation not permitted") }) {
@@ -766,8 +785,8 @@ enum FolderWatch {
 /// The one place to change a backup: name, picture and colour, schedule, drive type,
 /// appearance, and deleting it.
 struct SettingsSheet: View {
-    static let column: CGFloat = 176
-    static let width: CGFloat = 26 + column + 32 + column + 26
+    static let left: CGFloat = 168, right: CGFloat = 146   // as wide as what they hold: Keep earlier versions; the colour grid
+    static let width: CGFloat = 26 + left + 32 + right + 26   // equal margins both sides
     let view: JobView
     var close: () -> Void = {}
     @Environment(JobStore.self) private var store
@@ -792,7 +811,7 @@ struct SettingsSheet: View {
                 // Two fixed columns: nothing chosen inside can change the panel's width.
                 Grid(alignment: .topLeading, horizontalSpacing: 32, verticalSpacing: 24) {
                     GridRow {
-                    section("Icon") {
+                    centred("Icon") {
                         LazyVGrid(columns: Array(repeating: GridItem(.fixed(32), spacing: 6, alignment: .leading), count: 4),
                                   alignment: .leading, spacing: 6) {
                             ForEach(Job.icons, id: \.self) { n in
@@ -804,8 +823,8 @@ struct SettingsSheet: View {
                         }
                         .fixedSize()
                     }
-                    .frame(width: Self.column, alignment: .leading)
-                    section("Background") {
+                    .frame(width: Self.left, alignment: .leading)
+                    centred("Background") {
                         LazyVGrid(columns: Array(repeating: GridItem(.fixed(32), spacing: 6, alignment: .leading), count: 4),
                                   alignment: .leading, spacing: 6) {
                             ForEach(Nippon.colors, id: \.hex) { c in
@@ -817,7 +836,7 @@ struct SettingsSheet: View {
                         }
                         .fixedSize()
                     }
-                    .frame(width: Self.column, alignment: .leading)
+                    .frame(width: Self.right, alignment: .leading)
                     }
                     GridRow {
                     VStack(alignment: .leading, spacing: 22) {
@@ -860,7 +879,7 @@ struct SettingsSheet: View {
                             .pickerStyle(.radioGroup).labelsHidden()
                         }
                     }
-                    .frame(width: Self.column, alignment: .leading)
+                    .frame(width: Self.left, alignment: .leading)
                     VStack(alignment: .leading, spacing: 22) {
                         section("Schedule") { ScheduleChooser(view: view) }
                         section("Threads") {
@@ -871,7 +890,7 @@ struct SettingsSheet: View {
                             .labelsHidden().fixedSize()
                         }
                     }
-                    .frame(width: Self.column, alignment: .leading)
+                    .frame(width: Self.right, alignment: .leading)
                     }
                 }
                 .frame(maxWidth: .infinity)
@@ -919,6 +938,15 @@ struct SettingsSheet: View {
     private func saveName() {
         let t = name.trimmingCharacters(in: .whitespaces)
         if !t.isEmpty { view.edit { $0.title = t } }
+    }
+
+    /// A title centred over its grid.
+    @ViewBuilder private func centred<C: View>(_ title: String, @ViewBuilder _ content: () -> C) -> some View {
+        VStack(alignment: .center, spacing: 8) {
+            Text(title).font(Typeface.text(13, .semibold)).foregroundStyle(Palette.ink)
+            content()
+        }
+        .fixedSize()
     }
 
     @ViewBuilder private func section<C: View>(_ title: String, @ViewBuilder _ content: () -> C) -> some View {
@@ -1086,4 +1114,5 @@ struct ScheduleChooser: View {
 
 extension Notification.Name {
     static let showSettings = Notification.Name("ArchivistShowSettings")
+    static let showProblems = Notification.Name("ArchivistShowProblems")
 }
