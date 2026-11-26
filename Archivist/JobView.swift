@@ -1,5 +1,6 @@
 import AppKit
 import ArchivistCore
+import os
 import ServiceManagement
 import SwiftUI
 
@@ -13,6 +14,7 @@ struct JobView: View {
     var runnerOverride: Runner? = nil                  // snapshots
     var runner: Runner { runnerOverride ?? store.runner(for: jobID) }
     @State var interrupted = false
+    @State var measuring = false                       // sources being walked: Start waits for the numbers
     @State var destinationState: DestinationState = .present
     enum DestinationState { case present, folderMissing, driveMissing }
     @State var drives: [String: Drive] = [:]          // path → drive, looked up off the main thread
@@ -161,7 +163,7 @@ struct JobView: View {
     @MainActor static var lastCheck = Date.distantPast
 
     func refresh() async {
-        guard !preset else { return }
+        guard !preset, !runner.running else { return }   // a running backup walks the tree itself
         JobView.lastCheck = Date()
         let j = job
         var paths = j.sources.map(\.readPath)
@@ -191,17 +193,37 @@ struct JobView: View {
         }.value
         // Sizes first (local, quick): the bar and rows are right at once; then the comparison
         // with the destination, which can be slow on a busy or spinning drive.
+        // An edit or Start cancels this refresh: its walks stop too, or each edit stacked one more
+        // walk of the same trees and they crawled on together for many minutes.
+        measuring = true
+        defer { if !Task.isCancelled { measuring = false } }
         for s in j.sources where store.surveys[s.id] == nil {
-            if let size = await Task.detached(priority: .background, operation: { quiet(); return try? Survey.size(of: s.readPath, excluded: j.excluded(in: s), patterns: s.namesLeftOut) }).value {
+            if let size = await JobView.walk({ stop in try Survey.size(of: s.readPath, excluded: j.excluded(in: s), patterns: s.namesLeftOut, stop: stop) }) {
                 store.surveys[s.id] = size
             }
+            if Task.isCancelled { return }
         }
         for s in j.sources where !s.skip {   // an Exclude row is never compared: it isn't copied
             let target = j.target(for: s) ?? "/nonexistent-archivist-destination"
-            if let full = await Task.detached(priority: .background, operation: { quiet(); return try? Survey.of(source: s.readPath, destination: target, excluded: j.excluded(in: s), patterns: s.namesLeftOut) }).value {
+            if let full = await JobView.walk({ stop in try Survey.of(source: s.readPath, destination: target, excluded: j.excluded(in: s), patterns: s.namesLeftOut, stop: stop) }) {
                 store.surveys[s.id] = full
             }
+            if Task.isCancelled { return }
         }
+    }
+
+    /// Start can go once every source has its numbers, or the walking is over (a walk that failed
+    /// must not hold Start back forever).
+    var measured: Bool {
+        !measuring || job.sources.filter { !$0.skip }.allSatisfy { surveys[$0.id]?.compared == true }
+    }
+
+    /// A walk off the main thread, quiet, that stops when the task awaiting it is cancelled.
+    nonisolated static func walk<T: Sendable>(_ body: @escaping @Sendable (@escaping () -> Bool) throws -> T) async -> T? {
+        let stop = OSAllocatedUnfairLock(initialState: false)
+        return await withTaskCancellationHandler {
+            await Task.detached(priority: .background) { quiet(); return try? body { stop.withLock { $0 } } }.value
+        } onCancel: { stop.withLock { $0 = true } }
     }
 
     /// The drive under a path; the destination wears the kind set in Settings, if any.
@@ -485,7 +507,7 @@ struct DestinationPane: View {
                         Button(view.runner.stopping ? "Stopping…" : "Stop") { view.runner.stop() }.buttonStyle(QuietButton())
                             .disabled(view.runner.stopping)
                     } else {
-                        Button("Start backup", action: view.backUp).buttonStyle(PrimaryButton()).disabled(!job.ready || view.destinationState != .present)
+                        Button("Start backup", action: view.backUp).buttonStyle(PrimaryButton()).disabled(!job.ready || view.destinationState != .present || !view.measured)
                             .keyboardShortcut(.return, modifiers: .command)
                     }
                 }
@@ -690,7 +712,8 @@ struct BottomBar: View {
                         .padding(.horizontal, 150)   // clear of the speed meter and word at the ends
                     } else {
                         Text(r.stopping ? "Stopping…"
-                             : (job.ready && view.destinationState == .present ? "Ready to start" : " "))
+                             : !(job.ready && view.destinationState == .present) ? " "
+                             : view.measured ? "Ready to start" : "Calculating…")
                             .font(Typeface.text(12))
                             .foregroundStyle(r.running ? Palette.ink : Palette.soft)
                             .frame(maxWidth: .infinity)

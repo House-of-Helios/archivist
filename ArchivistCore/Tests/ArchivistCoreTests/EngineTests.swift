@@ -386,6 +386,13 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(s.toCopy, 1)
     }
 
+    func testStoppedSurveyGivesNoNumber() {
+        write("a.txt", "aaaa")
+        XCTAssertThrowsError(try Survey.size(of: src, stop: { true }))
+        XCTAssertThrowsError(try Survey.of(source: src, destination: dst, stop: { true }))
+        XCTAssertEqual(try Survey.size(of: src, stop: { false }).bytes, 4)
+    }
+
     func testModelNamesTellTheKindWhenTheCaseHidesIt() {
         XCTAssertEqual(Drive.kindFromModel(vendor: "WD", product: "My Passport 2629"), .spinning)
         XCTAssertEqual(Drive.kindFromModel(vendor: "WD", product: "My Passport SSD"), .ssd)

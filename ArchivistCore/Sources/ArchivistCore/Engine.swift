@@ -711,20 +711,26 @@ public struct Survey: Sendable {
 
     /// Just the source's size: a local scan, quick, so the window can size things before the
     /// (possibly slow) comparison with the destination finishes.
-    public static func size(of source: String, excluded: Set<String> = [], patterns: [String] = []) throws -> Survey {
+    /// `stop` true ends the walk and throws CancellationError: a half-walked tree is no size at all.
+    public static func size(of source: String, excluded: Set<String> = [], patterns: [String] = [], stop: (() -> Bool)? = nil) throws -> Survey {
         var s = Survey()
         var src = TreeScanner(excluded: excluded)
         src.patterns = patterns + Options.alwaysLeftOut
-        for e in try src.scan(source).entries where e.kind == .file { s.files += 1; s.bytes += e.size }
+        src.shouldStop = stop
+        let entries = try src.scan(source).entries
+        if stop?() == true { throw CancellationError() }
+        for e in entries where e.kind == .file { s.files += 1; s.bytes += e.size }
         s.compared = false
         return s
     }
 
-    public static func of(source: String, destination: String, excluded: Set<String> = [], patterns: [String] = []) throws -> Survey {
+    public static func of(source: String, destination: String, excluded: Set<String> = [], patterns: [String] = [], stop: (() -> Bool)? = nil) throws -> Survey {
         var s = Survey()
         var src = TreeScanner(excluded: excluded)
         src.patterns = patterns + Options.alwaysLeftOut
+        src.shouldStop = stop
         let (entries, _) = try src.scan(source)
+        if stop?() == true { throw CancellationError() }
         for e in entries where e.kind == .file { s.files += 1; s.bytes += e.size }
         s.destinationExists = FileManager.default.fileExists(atPath: destination)
         guard s.destinationExists else {
@@ -736,7 +742,9 @@ public struct Survey: Sendable {
         }
         var dst = TreeScanner(skipRootNames: Set([Names.past, Names.state] + Names.legacyPasts))
         dst.patterns = patterns + Options.alwaysLeftOut
+        dst.shouldStop = stop
         let (dEntries, _) = try dst.scan(destination)
+        if stop?() == true { throw CancellationError() }
         let window = (try? Drive.of(path: source).mtimeWindow(with: Drive.of(path: destination))) ?? 1
         let c = Compare.changes(source: entries, destination: dEntries, mtimeWindow: window)
         s.toCopy = c.copy.count

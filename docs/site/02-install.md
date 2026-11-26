@@ -21,6 +21,8 @@ House of Helios does not pay Apple for a developer account, so macOS does not kn
 3. Next to "Archivist was blocked", click **Open Anyway**.
 4. Confirm with **Open**, and enter your password if asked.
 
+If Archivist only bounces in the Dock and never opens, it is waiting on these steps: right-click it, choose **Force Quit**, then do step 2. Downloading it again does not help, because every download from a browser asks once.
+
 From then on Archivist opens like any other app. Updates installed through the app do not ask again, because every release carries the same signature.
 
 ## Checking the download (optional)
