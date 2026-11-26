@@ -198,8 +198,10 @@ struct JobView: View {
         measuring = true
         defer { if !Task.isCancelled { measuring = false } }
         for s in j.sources where store.surveys[s.id] == nil {
+            let t = Date()
             if let size = await JobView.walk({ stop in try Survey.size(of: s.readPath, excluded: j.excluded(in: s), patterns: s.namesLeftOut, stop: stop) }) {
                 store.surveys[s.id] = size
+                DevLog.write(String(format: "sized: %@, %d files, %.1f s", s.name, size.files, Date().timeIntervalSince(t)))
             }
             if Task.isCancelled { return }
         }
@@ -225,7 +227,7 @@ struct JobView: View {
     nonisolated static func walk<T: Sendable>(_ body: @escaping @Sendable (@escaping () -> Bool) throws -> T) async -> T? {
         let stop = OSAllocatedUnfairLock(initialState: false)
         return await withTaskCancellationHandler {
-            await Task.detached(priority: .background) { quiet(); return try? body { stop.withLock { $0 } } }.value
+            await Task.detached(priority: .utility) { quiet(); return try? body { stop.withLock { $0 } } }.value
         } onCancel: { stop.withLock { $0 = true } }
     }
 
@@ -787,10 +789,11 @@ func fileSystemName(_ d: Drive) -> String {
     ["apfs": "APFS", "hfs": "Mac OS Extended", "exfat": "exFAT", "msdos": "FAT", "smbfs": "SMB"][d.fileSystem] ?? d.fileSystem
 }
 
-/// Measuring sources is housekeeping: background CPU (efficiency cores) and throttled disk reads,
-/// the way Spotlight and Time Machine walk a disk, so the Mac never feels it.
+/// Measuring sources is work someone waits on (Start waits for the sizes): utility, one tier
+/// above background. Background + IOPOL_THROTTLE (Time Machine's tier) held the reads back
+/// whenever anything else touched the disk, and a big folder took many minutes to size.
 func quiet() {
-    setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_THREAD, IOPOL_THROTTLE)
+    setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_THREAD, IOPOL_UTILITY)
 }
 
 func bytes(_ n: Int64) -> String { ByteCountFormatter.string(fromByteCount: n, countStyle: .file) }
