@@ -11,16 +11,19 @@ public enum Schedule: Codable, Hashable, Sendable {
 
     /// - lastRun: when this backup last finished (by hand or by schedule).
     /// - destinationSince: when the destination was first seen present this time (nil = not there).
+    /// - setAt: when this schedule was chosen. A time before it was never missed: choosing
+    ///   "daily at 14:00" at 22:00 waits for tomorrow's 14:00 instead of starting at once.
     /// A slot missed while the Mac slept runs on wake: due when the last run is older than the
     /// most recent slot.
-    public func isDue(now: Date, lastRun: Date?, destinationSince: Date?, calendar: Calendar = .current) -> Bool {
+    public func isDue(now: Date, lastRun: Date?, destinationSince: Date?, setAt: Date? = nil, calendar: Calendar = .current) -> Bool {
         guard let since = destinationSince else { return false }
-        let last = lastRun ?? .distantPast
+        let lastFinished = lastRun ?? .distantPast
+        let last = max(lastFinished, setAt ?? .distantPast)
         switch self {
         case .byHand:
             return false
         case .whenConnected:
-            return last < since
+            return lastFinished < since
         case let .hourly(minute):
             return mostRecent(DateComponents(minute: minute), before: now, calendar).map { last < $0 } ?? false
         case let .daily(hour, minute):

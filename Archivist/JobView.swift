@@ -392,7 +392,7 @@ struct SourceRow: View {
         if !v.destinationExists { return "\(size), not backed up yet" }
         if v.toCopy == 0 { return "\(size), up to date" }
         if v.bytesToCopy >= v.bytes { return "\(size), not backed up yet" }   // everything is new: the same size twice says nothing
-        return v.bytesToCopy > 0 ? "\(size), \(bytes(v.bytesToCopy)) to back up" : "\(size), small changes to back up"
+        return v.bytesToCopy > 0 ? "\(size), \(bytes(v.bytesToCopy)) not backed up yet" : "\(size), small changes not backed up yet"
     }
 
     private var statusColor: Color {
@@ -675,18 +675,21 @@ struct BottomBar: View {
                             Emoji(name: icon, size: 14)   // at the edge: the word can change length, the icon stays put
                         }
                     }
-                    if r.running && !estimating && !r.stopping && !r.finishing, let left = r.remaining(at: tl.date) {
-                        // "~6:15 left  //  67% done  //  17:15 total": the percent sits on the app's middle.
+                    if r.running && !r.stopping {
+                        // "~6:15 left  //  67% done  //  11:00 elapsed": the middle sits on the app's middle.
+                        // Left is the estimate; elapsed is a plain clock from Start, never estimated.
+                        let left = r.remaining(at: tl.date)
+                        let pct = Int(r.steadyFraction(at: tl.date) * 100)
+                        let done = r.finishing || pct >= 100
                         HStack(spacing: 0) {
-                            Text("~\(Runner.clock(left)) left  //  ").frame(maxWidth: .infinity, alignment: .trailing)
-                            Text("\(Int(r.steadyFraction(at: tl.date) * 100))% done").fontWeight(.semibold).fixedSize()
-                            Text("  //  \(Runner.clock(r.elapsed + left)) total").frame(maxWidth: .infinity, alignment: .leading)
+                            Text(done || estimating ? "" : "~\(Runner.clock(left ?? 0)) left  //  ").frame(maxWidth: .infinity, alignment: .trailing)
+                            Text(done ? "Finishing…" : estimating ? "Calculating…" : "\(pct)% done").fontWeight(.semibold).fixedSize()
+                            Text("  //  \(Runner.clock(r.elapsed)) elapsed").frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .font(Typeface.number(12.5)).foregroundStyle(Palette.ink)
                         .padding(.horizontal, 150)   // clear of the speed meter and word at the ends
                     } else {
-                        Text(r.stopping ? "Stopping…" : r.finishing ? "Finishing…"
-                             : r.running ? "Calculating time left…"
+                        Text(r.stopping ? "Stopping…"
                              : (job.ready && view.destinationState == .present ? "Ready to start" : " "))
                             .font(Typeface.text(12))
                             .foregroundStyle(r.running ? Palette.ink : Palette.soft)

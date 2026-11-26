@@ -115,6 +115,8 @@ public final class Engine {
     private var stamp = ""
     private var newPaths = Set<String>()
     private var deadRunStarted: Double?
+    /// Files a dead run wrote: Archivist's own unfinished output, replaced without keeping a copy in _📚archive.
+    private var suspect = Set<String>()
     private var inFlight: [UnsafeRawPointer: Int64] = [:]   // per copy in progress
     private var lastInFlightReport = Date.distantPast
     private var busy: [Entry] = []          // files that kept changing: tried again once at the end
@@ -197,7 +199,6 @@ public final class Engine {
             (path as NSString).lastPathComponent.range(of: "^\\" + Names.tempPrefix + "[0-9A-F]{8}$", options: .regularExpression) != nil
         }
         if !options.dryRun { for e in dstEntries where isTemp(e.path) { unlink(destination + "/" + e.path) } }
-        var suspect = Set<String>()
         if let since = deadRunStarted {   // a run died mid-way: its files are suspect until copied again
             for e in dstEntries where e.kind == .file {
                 var st = stat()
@@ -397,6 +398,9 @@ public final class Engine {
             }
             let me = Unmanaged.passUnretained(self).toOpaque()
             let cb: copyfile_callback_t = { what, stage, state, _, _, ctx in
+                // A failed write (the drive unplugged): give up on this file. CONTINUE here means
+                // "retry the write", and copyfile retries forever (seen: 190% CPU, never returning).
+                if stage == COPYFILE_ERR { return COPYFILE_QUIT }
                 guard let ctx else { return COPYFILE_CONTINUE }
                 let engine = Unmanaged<Engine>.fromOpaque(ctx).takeUnretainedValue()
                 if what == COPYFILE_COPY_DATA && stage == COPYFILE_PROGRESS, let state {
@@ -492,7 +496,7 @@ public final class Engine {
             if f.fd >= 0 { close(f.fd) }
             let target = destination + "/" + f.entry.path
             var st = stat()
-            if f.temp != target, lstat(target, &st) == 0 && options.keepChanged && !retire(f.entry.path, gone: false) {   // off: the rename replaces it
+            if f.temp != target, lstat(target, &st) == 0 && options.keepChanged && !suspect.contains(f.entry.path) && !retire(f.entry.path, gone: false) {   // off: the rename replaces it
                 unlink(f.temp)   // the old version could not be archived: it stays, this copy waits for the next run
                 continue
             }
@@ -532,7 +536,7 @@ public final class Engine {
             return
         }
         var st = stat()
-        if lstat(target, &st) == 0 && options.keepChanged && !retire(e.path, gone: false) { unlink(temp); return }
+        if lstat(target, &st) == 0 && options.keepChanged && !suspect.contains(e.path) && !retire(e.path, gone: false) { unlink(temp); return }
         if rename(temp, target) != 0 { note(ArchivistError.io("rename", target, errno)); unlink(temp); return }
         lock.lock(); copied += 1; progress.filesDone += 1; progress.smallDone += 1; let p = progress; lock.unlock()
         onProgress?(p)
@@ -630,6 +634,11 @@ public final class Engine {
         }
     }
 
+    /// Locks this process holds right now. A lock naming this process but missing here was left by
+    /// one of its own runs that died (the drive was unplugged and the lock could not be removed).
+    private static var held = Set<String>()
+    private static let heldLock = NSLock()
+
     private func takeRunLock(_ stateDir: String) throws -> Int32 {
         let path = stateDir + "/run.lock"
         for _ in 0..<2 {
@@ -637,12 +646,17 @@ public final class Engine {
             if fd >= 0 {
                 let pid = "\(getpid())\n"
                 _ = pid.withCString { write(fd, $0, strlen($0)) }
+                // On the platter before any file: after an unplug, the lock is what tells this
+                // run's half files from good ones.
+                if fcntl(fd, F_FULLFSYNC) != 0 { fsync(fd) }
+                Self.heldLock.lock(); Self.held.insert(path); Self.heldLock.unlock()
                 return fd
             }
             // A lock left by a run that died: take it over. A live run: refuse.
+            Self.heldLock.lock(); let ours = Self.held.contains(path); Self.heldLock.unlock()
             if let text = try? String(contentsOfFile: path, encoding: .utf8),
                let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
-               kill(pid, 0) == 0 || errno == EPERM {
+               pid == getpid() ? ours : (kill(pid, 0) == 0 || errno == EPERM) {
                 throw ArchivistError.refused("Another Archivist run (pid \(pid)) is copying to this destination.")
             }
             // The dead run started when its lock was made: whatever it wrote since then may not
@@ -656,7 +670,9 @@ public final class Engine {
 
     private func releaseRunLock(_ fd: Int32, _ stateDir: String) {
         close(fd)
+        Self.heldLock.lock(); Self.held.remove(stateDir + "/run.lock"); Self.heldLock.unlock()
         unlink(stateDir + "/run.lock")
+        rmdir(stateDir)   // only when empty: nothing else of Archivist's is kept there
     }
 
     private func barrierSync(_ fd: Int32) {

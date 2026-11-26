@@ -20,7 +20,7 @@ enum Palette {
     static let accent = pair(0x9b90c2, 0x9b90c2)     // the app's lavender (Helios, 2026-11-25): Start, selection, focus
     static let onAccent = pair(0x1f1b2e, 0x1f1b2e)   // dark text on the lavender (white read at 2.9:1, dark at 7:1)
     static let good = pair(0x8cc084, 0x3f7f3a)       // "up to date"
-    static let due = pair(0xe06a6c, 0xb8393c)        // "to back up", "not backed up yet"
+    static let due = pair(0xe06a6c, 0xb8393c)        // "12 MB not backed up yet"
     static let warn = pair(0xd6a467, 0x93601d)       // a problem worth reading
 }
 

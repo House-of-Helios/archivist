@@ -69,7 +69,8 @@ struct Job: Codable, Identifiable, Hashable {
     var icon: String = Job.icons.randomElement()!   // a picture per backup, so a glance tells them apart
     var color: String = Nippon.colors.randomElement()!.hex
     var lookChosen = false                           // picked by hand in Settings: then it never follows the destination
-    var schedule: Schedule = .byHand
+    var schedule: Schedule = .byHand { didSet { if schedule != oldValue { scheduleSet = Date() } } }
+    var scheduleSet: Date?                           // when the schedule was last changed: a time before it is not "missed"
     var destinationKind: DriveKind?                  // nil = let Archivist decide (Settings)
     var keepDeleted = true                           // earlier versions (Settings)
     var keepChanged = true
@@ -148,6 +149,7 @@ struct Job: Codable, Identifiable, Hashable {
         threads = try c.decodeIfPresent(Int.self, forKey: .threads)
         lastRun = try c.decodeIfPresent(Date.self, forKey: .lastRun)
         destinationSince = try c.decodeIfPresent(Date.self, forKey: .destinationSince)
+        scheduleSet = try c.decodeIfPresent(Date.self, forKey: .scheduleSet)
         // Backups saved before icons: a steady pick from the id, so it never changes between launches.
         let saved = try c.decodeIfPresent(String.self, forKey: .icon)
         icon = saved.flatMap { Job.icons.contains($0) || $0 == "snail" ? $0 : nil } ?? Job.icons[Int(id.uuid.0) % Job.icons.count]  // backups are animals now
@@ -387,7 +389,7 @@ final class Runner {
         memory = DriveMemories.load()[driveKey] ?? DriveMemory(name: job.destination.map { DriveMemories.name(for: $0) } ?? "")
         secPerSmall = memory.secondsPerSmallFile ?? 1.0 / 40
         secPerMB = memory.secondsPerMB ?? 1.0 / 20   // 20 MB/s: a tired spinning disk, not a fresh one
-        measuredSmall = false; measuredBig = false
+        measuredSmall = false; measuredBig = false; smallSeconds = 0; bigSeconds = 0
         phase = (0, 0, 0, 0); phaseTick = nil
         // A drive with a past gives a time at once: no "Calculating" wait.
         if !memory.runs.isEmpty && (plannedSmall > 0 || plannedBig > 0) {
@@ -416,8 +418,10 @@ final class Runner {
             var bytes: Int64 = 0, total: Int64 = 0
             var past: String?
             var problems: [String] = []
-            var stopped = false
-            for (i, (source, dst)) in runs.enumerated() where !stopped && !self.stopRequested {
+            var stopped = false, failed = false
+            // The destination drive gone (unplugged, asleep): stop, and say that once, not per file.
+            func unplugged() -> Bool { job.destination.map { !FileManager.default.fileExists(atPath: $0) } ?? false }
+            for (i, (source, dst)) in runs.enumerated() where !stopped && !self.stopRequested && !unplugged() {
                 let src = source.readPath
                 var opts = Options()
                 opts.excluded = job.excluded(in: source)
@@ -463,27 +467,34 @@ final class Runner {
                     problems += r.problems
                     stopped = r.stopped
                 } catch {
+                    failed = true
                     problems.append("Folder \(source.name) not copied: \(error)")
                     DevLog.write("source failed: \(source.name): \(error)")
                 }
             }
+            let gone = unplugged()
+            if gone {
+                DevLog.write("destination disconnected: \(problems.count) problems after it went are left out")
+                problems = ["The destination was disconnected partway. Start again when it is back."]
+            }
             let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
             var parts: [String] = []
+            if gone { parts.append("Destination disconnected") }
             if stopped || self.stopRequested { parts.append("Stopped") }
             if copied > 0 || retired > 0 { parts.append("\(copied) copied (\(size)), \(unchanged) already there") }
             else if problems.isEmpty { parts.append("Nothing had changed") }
             else { parts.append("Nothing copied") }
             if retired > 0 { parts.append("\(retired) earlier versions kept") }
-            if !problems.isEmpty { parts.append("\(problems.count) not copied") }
+            if !problems.isEmpty && !gone { parts.append("\(problems.count) not copied") }
             let summary = parts.joined(separator: ", ")
             DevLog.write(String(format: "backup end: %@ — %@ in %.1f s", job.title, summary, Date().timeIntervalSince(backupStart)))
-            if let root = job.pastRoot, !stopped, !self.stopRequested {
+            if let root = job.pastRoot, !stopped, !self.stopRequested, !gone {
                 let removed = Past.prune(root, keepDays: job.keepDays, minFree: job.makeRoom ? Past.guardSpace(root) : 0)
                 if !removed.isEmpty { DevLog.write("earlier versions removed: \(removed.joined(separator: ", "))") }
             }
             DispatchQueue.main.async {
                 // What this drive did, for the next estimate: only a backup that ran to its end.
-                if !(stopped || self.stopRequested), !self.driveKey.isEmpty {
+                if !(stopped || self.stopRequested || gone || failed), !self.driveKey.isEmpty {
                     self.memory.add(.init(smallFiles: self.doneSmall, bigMB: Double(self.doneBig) / 1e6,
                                           looking: self.phase.looking, small: self.phase.small, big: self.phase.big, finishing: self.phase.finishing))
                     DriveMemories.save(self.memory, for: self.driveKey)
@@ -496,7 +507,8 @@ final class Runner {
                 self.running = false
                 self.stopping = false
                 self.engine = nil
-                let state = stopped || self.stopRequested ? "Stopped partway"
+                let state = gone ? "Destination disconnected"
+                    : stopped || self.stopRequested ? "Stopped partway"
                     : problems.isEmpty ? "Backed up"
                     : problems.count == 1 ? "Backed up, 1 file skipped" : "Backed up, \(problems.count) files skipped"
                 done(summary, state, past, total)
@@ -530,6 +542,8 @@ final class Runner {
     @ObservationIgnored private var phase = (looking: 0.0, small: 0.0, big: 0.0, finishing: 0.0)
     @ObservationIgnored private var phaseTick: (date: Date, small: Int, big: Int64)?
     @ObservationIgnored private var measuredBig = false
+    @ObservationIgnored private var smallSeconds = 0.0   // how long each rate has been measured this run
+    @ObservationIgnored private var bigSeconds = 0.0
     @ObservationIgnored private var lastStep: (date: Date, files: Int, bytes: Int64)?
     @ObservationIgnored private var lastLog = Date.distantPast
 
@@ -590,10 +604,13 @@ final class Runner {
         let dt = now.timeIntervalSince(last.date)
         guard dt >= 2 else { return }
         let dSmall = Double(small - last.files), dBig = big - Double(last.bytes) / 1e6
-        let w = 1 - pow(0.5, dt / 300)   // the last five minutes count most
+        // The last five minutes count most. Early on, what this run measured outweighs the guess it
+        // started from (the drive's past, or a tired disk's default counts as 30 s of measuring):
+        // a fast NVMe once showed 27 minutes left for a 23-second copy.
+        func weight(_ measured: Double) -> Double { max(1 - pow(0.5, dt / 300), dt / (measured + dt + (memory.runs.isEmpty ? 0 : 30))) }
         let both = lanes?.together ?? false
-        if dSmall > 0 && (both || dBig < 1) { secPerSmall = secPerSmall * (1 - w) + (dt / dSmall) * w; measuredSmall = true }
-        if dBig >= 1 && (both || dSmall < 1) { secPerMB = secPerMB * (1 - w) + (dt / dBig) * w; measuredBig = true }
+        if dSmall > 0 && (both || dBig < 1) { let w = weight(smallSeconds); secPerSmall = secPerSmall * (1 - w) + (dt / dSmall) * w; smallSeconds += dt; measuredSmall = true }
+        if dBig >= 1 && (both || dSmall < 1) { let w = weight(bigSeconds); secPerMB = secPerMB * (1 - w) + (dt / dBig) * w; bigSeconds += dt; measuredBig = true }
         lastStep = (now, small, Int64(big * 1e6))
         guard now.timeIntervalSince(started) >= 8 else { return }
         let smallLeft = Double(max(0, max(plannedSmall, doneSmall + progress.smallTotal) - small))
@@ -603,11 +620,12 @@ final class Runner {
         // Folder dates and the final flush, as this drive took them before.
         let files = Double(max(plannedSmall, doneSmall + progress.smallTotal)) + max(1, Double(max(plannedBig, doneBig + progress.bigBytesTotal)) / 50e6)
         let raw = copyTime + (finishing ? 0 : files * (memory.finishingPerFile ?? 0))
-        eta = eta.map { $0 * 0.8 + raw * 0.2 } ?? raw     // calm: no jumping minute to minute
+        eta = eta.map { raw < $0 * 0.5 ? raw : $0 * 0.8 + raw * 0.2 } ?? raw     // calm: no jumping minute to minute
         // The shown clock never ticks up: a shorter estimate eases in; a slightly longer one holds
         // the clock still; one over 25% longer jumps once (crawling up second by second felt broken).
         let shown = remaining(at: now) ?? eta!
-        if eta! < shown { etaAnchor = (now, shown + (eta! - shown) * 0.25) }
+        if eta! < shown * 0.5 { etaAnchor = (now, eta!) }   // far too long before: drop to it at once
+        else if eta! < shown { etaAnchor = (now, shown + (eta! - shown) * 0.25) }
         else if eta! > shown * 1.25 { etaAnchor = (now, eta!) }
         else { etaAnchor = (now, shown) }
     }

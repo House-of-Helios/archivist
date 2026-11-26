@@ -6,7 +6,7 @@ A backup has sources (what to copy), a destination (where it goes), and one butt
 
 ## 1. Sources
 
-Drop folders, or a whole drive, on the left side, or click the dashed box and choose. Each source gets its own picture and colour, a size, and a line saying where it stands: "not backed up yet", "2 changes to back up (12 MB)", "up to date".
+Drop folders, or a whole drive, on the left side, or click the dashed box and choose. Each source gets its own picture and colour, a size, and a line saying where it stands: "not backed up yet", "12 MB not backed up yet", "up to date".
 
 On the right of each source, a menu says what happens to that folder:
 

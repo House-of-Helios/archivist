@@ -245,7 +245,7 @@ final class EngineTests: XCTestCase {
     func testALiveRunsLockRefuses() throws {
         write("a.txt", "a")
         try FileManager.default.createDirectory(atPath: dst + "/" + Names.state, withIntermediateDirectories: true)
-        try "\(getpid())\n".write(toFile: dst + "/" + Names.state + "/run.lock", atomically: false, encoding: .utf8)
+        try "\(getppid())\n".write(toFile: dst + "/" + Names.state + "/run.lock", atomically: false, encoding: .utf8)   // another live process
         XCTAssertThrowsError(try backup())
     }
 
@@ -417,6 +417,8 @@ final class EngineTests: XCTestCase {
         XCTAssertTrue(daily.isDue(now: at(14, 10), lastRun: at(14, 5, day: 23), destinationSince: here, calendar: cal))
         XCTAssertTrue(daily.isDue(now: at(9, 0), lastRun: at(14, 5, day: 22), destinationSince: here, calendar: cal), "slept through yesterday's time")
         XCTAssertFalse(daily.isDue(now: at(14, 20), lastRun: at(14, 15), destinationSince: here, calendar: cal))
+        XCTAssertFalse(daily.isDue(now: at(22, 0), lastRun: nil, destinationSince: here, setAt: at(21, 59), calendar: cal), "chosen after today's time: waits for tomorrow")
+        XCTAssertTrue(daily.isDue(now: at(14, 1, day: 25), lastRun: nil, destinationSince: here, setAt: at(21, 59), calendar: cal), "then runs at tomorrow's time")
         // 2026-11-24 is a Tuesday (weekday 3).
         let weekly = Schedule.weekly(weekday: 3, hour: 9, minute: 0)
         XCTAssertTrue(weekly.isDue(now: at(9, 30), lastRun: at(9, 5, day: 17), destinationSince: here, calendar: cal))
@@ -563,6 +565,17 @@ final class EngineTests: XCTestCase {
         let r = try backup()
         XCTAssertEqual(try String(contentsOfFile: dst + "/a.txt", encoding: .utf8), "good", "the dead run's half file is copied again")
         XCTAssertEqual(r.copied, 1, "only what the dead run touched")
+        XCTAssertEqual(r.retired, 0, "the dead run's own half file is not an earlier version")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dst + "/.archivist"), "no empty state folder left behind")
+    }
+
+    func testALockLeftByThisProcessAfterAnUnplugIsTakenOver() throws {
+        write("a.txt", "good")
+        _ = try backup()
+        // The drive vanished mid-run: the lock (naming this very process) could not be removed.
+        try FileManager.default.createDirectory(atPath: dst + "/.archivist", withIntermediateDirectories: true)
+        try "\(getpid())\n".write(toFile: dst + "/.archivist/run.lock", atomically: false, encoding: .utf8)
+        XCTAssertNoThrow(try backup(), "not mistaken for a run still going")
     }
 
     func testLanesFollowTheMeasurements() {

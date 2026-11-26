@@ -28,7 +28,7 @@ enum Scheduler {
             let since = present ? (job.destinationSince ?? now) : nil
             if since != job.destinationSince, let i = store.jobs.firstIndex(where: { $0.id == job.id }) { store.jobs[i].destinationSince = since }
             guard job.ready, !store.runner(for: job.id).running,
-                  job.schedule.isDue(now: now, lastRun: job.lastRun, destinationSince: since) else { continue }
+                  job.schedule.isDue(now: now, lastRun: job.lastRun, destinationSince: since, setAt: job.scheduleSet) else { continue }
             DevLog.write("schedule: starting \(job.title) (\(job.schedule.words))")
             store.start(job.id)
         }
@@ -50,7 +50,7 @@ enum Scheduler {
             let present = job.destination.map { FileManager.default.fileExists(atPath: $0) } ?? false
             job.destinationSince = present ? (job.destinationSince ?? now) : nil
             store.jobs[i] = job
-            guard job.ready, job.schedule.isDue(now: now, lastRun: job.lastRun, destinationSince: job.destinationSince) else { continue }
+            guard job.ready, job.schedule.isDue(now: now, lastRun: job.lastRun, destinationSince: job.destinationSince, setAt: job.scheduleSet) else { continue }
             var copied = 0, problems = 0
             var bytes: Int64 = 0, total: Int64 = 0
             var past: String?
