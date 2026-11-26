@@ -66,7 +66,12 @@ enum AppInstaller {
         }
         // If it won't open, stay up and say so: the new build is already in place, so
         // opening Archivist by hand finishes the update.
-        guard run("/usr/bin/open", ["-n", installed.path]).ok else {
+        // Open it again only once this copy has quit: `open -n` while it still ran gave a second
+        // Dock icon. A small shell waits for this process to end, then opens the app normally.
+        let relaunch = Process()
+        relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
+        relaunch.arguments = ["-c", "while kill -0 \(getpid()) 2>/dev/null; do sleep 0.2; done; /usr/bin/open \"$0\"", installed.path]
+        do { try relaunch.run() } catch {
             return "Update installed — open Archivist again to finish."
         }
         NSApp.terminate(nil)

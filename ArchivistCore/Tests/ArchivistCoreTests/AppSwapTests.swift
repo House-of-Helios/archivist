@@ -34,6 +34,16 @@ final class AppSwapTests: XCTestCase {
         XCTAssertEqual(entries, ["Archivist.app"], "no old copy, no staged copy, no (previous)")
     }
 
+    func test_theBundleFolderKeepsItsIdentitySoTheDockKeepsItsIcon() throws {
+        let before = try FileManager.default.attributesOfItem(atPath: installed.path)[.systemFileNumber] as? Int
+        let staged = AppSwap.stagedURL(for: installed)
+        try makeApp(at: staged, version: "2.0.2")
+        try AppSwap.swap(installed: installed, staged: staged)
+        let after = try FileManager.default.attributesOfItem(atPath: installed.path)[.systemFileNumber] as? Int
+        XCTAssertEqual(before, after, "same folder: the Dock's reference still points at the running app")
+        XCTAssertEqual(version(installed), "2.0.2")
+    }
+
     func test_aMissingStagedBuildPutsTheAppBack() {
         XCTAssertThrowsError(try AppSwap.swap(installed: installed, staged: AppSwap.stagedURL(for: installed))) {
             XCTAssertEqual($0 as? AppSwap.Failure, .couldNotMoveIn)

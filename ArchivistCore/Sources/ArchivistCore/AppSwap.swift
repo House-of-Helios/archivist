@@ -1,9 +1,9 @@
 import Foundation
 
 /// How an update goes in. While the app still runs, the new build is copied
-/// in beside it under a hidden name and checked; then the running bundle and the new one
-/// trade places by rename (instant, on the same disk), the old one is deleted, and the new
-/// one is opened. Nothing is left behind and nothing shows: no helper script, no
+/// in beside it under a hidden name and checked; then the two bundles' `Contents` trade
+/// places by one atomic rename (the bundle folder stays, so the Dock keeps its icon), the old
+/// contents are deleted, and the app is opened again. Nothing is left behind and nothing shows: no helper script, no
 /// "(previous)" copy, no second app in Applications.
 ///
 /// This type is the part that touches the disk by name, so it can be tested on fake
@@ -36,21 +36,24 @@ public enum AppSwap {
         case couldNotMoveIn
     }
 
-    /// The new build (already copied to `staged` and checked) takes the installed name; the
-    /// old one is deleted. On any failure the installed app is left where it was.
+    /// The new build (already copied to `staged` and checked) goes in; the old one is deleted.
+    /// The bundle folder itself stays: only its `Contents` trade places, in one atomic
+    /// `renamex_np(RENAME_SWAP)`. The Dock (and Finder aliases) know an app by its folder's file
+    /// identity, so swapping whole bundles left the Dock icon on the deleted copy and the new one
+    /// came up as a second icon. On any failure the installed app is left as it was.
     public static func swap(installed: URL, staged: URL, fileManager fm: FileManager = .default) throws {
-        let old = oldURL(for: installed)
-        try? fm.removeItem(at: old)
-        do { try fm.moveItem(at: installed, to: old) } catch {
-            try? fm.removeItem(at: staged)
-            throw Failure.couldNotMoveAside
-        }
-        do { try fm.moveItem(at: staged, to: installed) } catch {
-            try? fm.moveItem(at: old, to: installed)
+        let new = staged.appendingPathComponent("Contents"), current = installed.appendingPathComponent("Contents")
+        guard fm.fileExists(atPath: new.path) else {
             try? fm.removeItem(at: staged)
             throw Failure.couldNotMoveIn
         }
-        try? fm.removeItem(at: old)
+        guard renamex_np(new.path, current.path, UInt32(RENAME_SWAP)) == 0 else {
+            try? fm.removeItem(at: staged)
+            throw Failure.couldNotMoveIn
+        }
+        try? fm.removeItem(at: staged)   // now holds the old Contents
+        // Finder and Launch Services see the folder's date change and read the new Info.plist.
+        try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: installed.path)
     }
 
     /// Clears whatever `leftovers` finds. Returns what was removed.
