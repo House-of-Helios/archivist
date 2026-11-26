@@ -37,50 +37,111 @@ public struct TreeScanner {
         self.skipRootNames = skipRootNames
     }
 
+    /// Folders listed at once. nil: 16 on a network drive (each listing waits a round trip;
+    /// 16 in flight read 11x faster over SMB, THESIS §6), 1 on a local one (a spinning disk
+    /// must not seek between folders).
+    public var width: Int?
+
     /// Every entry under `root`, parents before children, sorted by path within a folder.
     /// Unreadable folders are reported in `problems`, never silently skipped.
     public mutating func scan(_ root: String) throws -> (entries: [Entry], problems: [String]) {
         var rootStat = stat()
         guard lstat(root, &rootStat) == 0 else { throw ArchivistError.io("lstat", root, errno) }
-        var out: [Entry] = []
+        let width = self.width ?? (TreeScanner.isNetwork(root) ? 16 : 1)
+        let me = self, rootDev = rootStat.st_dev
         var problems: [String] = []
-        var stack: [String] = [""]
-        while let rel = stack.popLast() {
+        // Level by level, each level's folders listed `width` at a time ...
+        var listings: [String: Listing] = [:]
+        var level = [""]
+        while !level.isEmpty {
             if shouldStop?() == true { break }
-            let abs = rel.isEmpty ? root : root + "/" + rel
-            let children: [Entry]
-            do {
-                children = try TreeScanner.list(abs, relative: rel)
-            } catch {
-                if rel.isEmpty { throw error }
-                problems.append("\(error)")
-                unreadable.append(rel)
-                continue
-            }
-            var dirs: [String] = []
-            for e in children.sorted(by: { $0.path < $1.path }) {
-                let name = (e.path as NSString).lastPathComponent
-                if rel.isEmpty && skipRootNames.contains(name) { continue }
-                if skipAppleDouble && name.hasPrefix("._") { continue }
-                if patterns.contains(where: { p in
-                    guard let at = p.firstIndex(of: "@") else { return fnmatch(p, name, 0) == 0 }
-                    return e.kind == .directory && fnmatch(String(p[..<at]), name, 0) == 0
-                        && access(abs + "/" + p[p.index(after: at)...], F_OK) == 0
-                }) { continue }
-                if excluded.contains(e.path) { continue }
-                if e.kind == .directory {
-                    var st = stat()
-                    if lstat(root + "/" + e.path, &st) == 0, st.st_dev != rootStat.st_dev {
-                        otherVolumes.append(e.path)
-                        continue
-                    }
-                    dirs.append(e.path)
+            let results = TreeScanner.map(level, width: width) { me.listOne($0, root: root, rootDev: rootDev) }
+            var next: [String] = []
+            for (rel, l) in zip(level, results) {
+                if let error = l.error {
+                    if rel.isEmpty { throw error }
+                    problems.append("\(error)")
+                    unreadable.append(rel)
+                    continue
                 }
-                out.append(e)
+                otherVolumes += l.otherVolumes
+                next += l.dirs
+                listings[rel] = l
             }
-            stack.append(contentsOf: dirs.reversed())
+            level = next
+        }
+        // ... then laid out depth first, the order callers have always had.
+        var out: [Entry] = []
+        var stack = [""]
+        while let rel = stack.popLast() {
+            guard let l = listings.removeValue(forKey: rel) else { continue }
+            out += l.entries
+            stack.append(contentsOf: l.dirs.reversed())
         }
         return (out, problems)
+    }
+
+    struct Listing { var entries: [Entry] = []; var dirs: [String] = []; var otherVolumes: [String] = []; var error: Error? }
+
+    /// One folder's kept entries and subfolders, after the leaving-out rules.
+    func listOne(_ rel: String, root: String, rootDev: dev_t) -> Listing {
+        let abs = rel.isEmpty ? root : root + "/" + rel
+        var l = Listing()
+        let children: [Entry]
+        do { children = try TreeScanner.list(abs, relative: rel) } catch { l.error = error; return l }
+        for e in children.sorted(by: { $0.path < $1.path }) {
+            let name = (e.path as NSString).lastPathComponent
+            if rel.isEmpty && skipRootNames.contains(name) { continue }
+            if skipAppleDouble && name.hasPrefix("._") { continue }
+            if patterns.contains(where: { p in
+                guard let at = p.firstIndex(of: "@") else { return fnmatch(p, name, 0) == 0 }
+                return e.kind == .directory && fnmatch(String(p[..<at]), name, 0) == 0
+                    && access(abs + "/" + p[p.index(after: at)...], F_OK) == 0
+            }) { continue }
+            if excluded.contains(e.path) { continue }
+            if e.kind == .directory {
+                var st = stat()
+                if lstat(root + "/" + e.path, &st) == 0, st.st_dev != rootDev {
+                    l.otherVolumes.append(e.path)
+                    continue
+                }
+                l.dirs.append(e.path)
+            }
+            l.entries.append(e)
+        }
+        return l
+    }
+
+    /// `f` over `items`, `width` at a time, results in order.
+    static func map<T>(_ items: [String], width: Int, _ f: (String) -> T) -> [T] {
+        guard width > 1, items.count > 1 else { return items.map(f) }
+        var out = [T?](repeating: nil, count: items.count)
+        let lock = NSLock()
+        var next = 0
+        let qos = DispatchQoS.QoSClass(rawValue: qos_class_self()) ?? .default
+        withoutActuallyEscaping(f) { f in
+            out.withUnsafeMutableBufferPointer { b in
+                let buf = b   // each slot written by exactly one worker
+                let group = DispatchGroup()
+                for _ in 0..<min(width, items.count) {
+                    DispatchQueue.global(qos: qos).async(group: group) {
+                        while true {
+                            lock.lock(); let i = next; next += 1; lock.unlock()
+                            guard i < items.count else { return }
+                            buf[i] = f(items[i])
+                        }
+                    }
+                }
+                group.wait()
+            }
+        }
+        return out.map { $0! }
+    }
+
+    /// A drive reached over a network (SMB, NFS, AFP, WebDAV): not marked local by the kernel.
+    static func isNetwork(_ path: String) -> Bool {
+        var s = statfs()
+        return statfs(path, &s) == 0 && s.f_flags & UInt32(MNT_LOCAL) == 0
     }
 
     /// One folder's entries via getattrlistbulk.

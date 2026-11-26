@@ -205,8 +205,10 @@ struct JobView: View {
         }
         for s in j.sources where !s.skip {   // an Exclude row is never compared: it isn't copied
             let target = j.target(for: s) ?? "/nonexistent-archivist-destination"
+            let t = Date()
             if let full = await JobView.walk({ stop in try Survey.of(source: s.readPath, destination: target, excluded: j.excluded(in: s), patterns: s.namesLeftOut, stop: stop) }) {
                 store.surveys[s.id] = full
+                DevLog.write(String(format: "counted: %@, %d files, %d to copy, %.1f s", s.name, full.files, full.toCopy, Date().timeIntervalSince(t)))
             }
             if Task.isCancelled { return }
         }

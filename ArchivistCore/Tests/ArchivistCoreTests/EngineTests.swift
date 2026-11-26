@@ -386,6 +386,18 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(s.toCopy, 1)
     }
 
+    func testWideScanListsTheSameTreeInTheSameOrder() throws {
+        for i in 0..<30 { write("d\(i % 5)/e\(i % 3)/f\(i).txt", "x\(i)") }
+        write("top.txt", "t")
+        write("d1/node_modules/skip.js", "s")
+        var one = TreeScanner(); one.width = 1; one.patterns = ["node_modules"]
+        var wide = TreeScanner(); wide.width = 16; wide.patterns = ["node_modules"]
+        let a = try one.scan(src), b = try wide.scan(src)
+        XCTAssertEqual(a.entries, b.entries)
+        XCTAssertEqual(a.entries.count, 1 + 5 + 15 + 30)
+        XCTAssertFalse(b.entries.contains { $0.path.contains("node_modules") })
+    }
+
     func testStoppedSurveyGivesNoNumber() {
         write("a.txt", "aaaa")
         XCTAssertThrowsError(try Survey.size(of: src, stop: { true }))
