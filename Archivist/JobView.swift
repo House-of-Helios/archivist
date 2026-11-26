@@ -214,10 +214,11 @@ struct JobView: View {
         }
     }
 
-    /// Start can go once every source has its numbers, or the walking is over (a walk that failed
-    /// must not hold Start back forever).
+    /// Start can go once every source has its size (local, quick), or the walking is over (a walk
+    /// that failed must not hold Start back forever). Not the comparison: the backup compares for
+    /// itself, and Start cancels this one, so the destination is never walked twice for one run.
     var measured: Bool {
-        !measuring || job.sources.filter { !$0.skip }.allSatisfy { surveys[$0.id]?.compared == true }
+        !measuring || job.sources.filter { !$0.skip }.allSatisfy { surveys[$0.id] != nil }
     }
 
     /// A walk off the main thread, quiet, that stops when the task awaiting it is cancelled.
