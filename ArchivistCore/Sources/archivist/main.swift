@@ -6,7 +6,7 @@ archivist: copy any drive or folder to another, the way each drive moves best.
 
   archivist copy SOURCE DESTINATION [--exclude PATH]... [--dry-run]
                  [--source-kind ssd|spinning|unknown|network] [--destination-kind ...]
-                 [--lanes SMALL,BIG]
+                 [--lanes SMALL,BIG] [--order small|big]
   archivist drive PATH          what Archivist sees for the drive under PATH
 
 Nothing is ever deleted: a replaced or vanished file moves to DESTINATION/_📚archive/<date>/.
@@ -49,6 +49,9 @@ case "copy":
         case "--callback-all": opts.callbackFrom = 0
         case "--source-kind": opts.sourceKind = DriveKind(rawValue: value()) ?? { fail("unknown kind") }()
         case "--destination-kind": opts.destinationKind = DriveKind(rawValue: value()) ?? { fail("unknown kind") }()
+        case "--order":   // bench: small | big (one lane after the other); default: the lanes decide
+            let v = value(); guard v == "small" || v == "big" else { fail("--order small|big") }
+            opts.bigFirst = v == "big"
         case "--lanes":
             let n = value().split(separator: ",").compactMap { Int($0) }
             guard n.count == 2, n.allSatisfy({ $0 > 0 }) else { fail("--lanes SMALL,BIG") }

@@ -1,5 +1,5 @@
 {
-  "images" : [ { "filename" : "floppy_disk.svg", "idiom" : "universal" } ],
+  "images" : [ { "filename" : "gem_stone.svg", "idiom" : "universal" } ],
   "info" : { "author" : "xcode", "version" : 1 },
   "properties" : { "preserves-vector-representation" : true, "template-rendering-intent" : "original" }
 }

@@ -434,12 +434,14 @@ struct DestinationPane: View {
         let d = view.drive(job.destination)
         let needed = job.sources.filter { !$0.skip }.compactMap { view.surveys[$0.id] }.filter(\.compared).reduce(Int64(0)) { $0 + $1.bytesToCopy }
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .center) {
+            ZStack {   // the title centred over the picture below; the gear keeps the right edge
                 Text("Destination").font(Typeface.title(24)).foregroundStyle(Palette.ink)
-                Spacer()
-                Button { NotificationCenter.default.post(name: .showSettings, object: nil) } label: { Emoji(name: "gear", size: 20) }
-                    .buttonStyle(.plain).help("Settings: name, picture, schedule, drive type, delete")
-                    .offset(y: 3)   // centred on the title's letters, like Sources' plus
+                HStack {
+                    Spacer()
+                    Button { NotificationCenter.default.post(name: .showSettings, object: nil) } label: { Emoji(name: "gear", size: 20) }
+                        .buttonStyle(.plain).help("Settings: name, picture, schedule, drive type, delete")
+                        .offset(y: 3)   // centred on the title's letters, like Sources' plus
+                }
             }
             .frame(height: 30)
             .frame(height: Header.height, alignment: .bottom).padding(.bottom, Header.below)   // same box as Sources'
@@ -450,11 +452,18 @@ struct DestinationPane: View {
                 VStack(spacing: 8) {
                     Badge(icon: job.icon, hex: job.color, size: compact ? 44 : 66)
                         .overlay(alignment: .bottomTrailing) {
-                            if let d { Emoji(name: driveSymbol(d), size: 22).padding(3).background(Circle().fill(Palette.raised)).offset(x: 8, y: 4) }
+                            if let d {
+                                Emoji(name: driveSymbol(d), size: 22).padding(3).background(Circle().fill(Palette.raised))
+                                    .overlay(alignment: .trailing) {   // the drive's kind, hung off the badge's right
+                                        Text(kindName(d)).font(Typeface.text(12.5)).foregroundStyle(Palette.soft)
+                                            .fixedSize().alignmentGuide(.trailing) { t in t[.leading] - 4 }
+                                    }
+                                    .offset(x: 8, y: 4)
+                            }
                         }
                     Text(location(path, d)).font(Typeface.text(15, .semibold)).foregroundStyle(Palette.ink)
                         .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
-                    if let d, !compact { Text(kindWords(d) + (job.destinationKind == nil ? "" : ", set by hand")).font(Typeface.text(12)).foregroundStyle(Palette.soft) }
+                    if let d, !compact { Text(fileSystemName(d) + (job.destinationKind == nil ? "" : ", set by hand")).font(Typeface.text(12)).foregroundStyle(Palette.soft) }
                 }
                 .frame(maxWidth: .infinity)
 
@@ -601,7 +610,7 @@ struct BottomBar: View {
         let job = view.job
         // Real sizes only: until every source's size is known, a plain track instead of made-up chunks.
         let known = job.sources.filter { !$0.skip }.allSatisfy { view.surveys[$0.id] != nil }
-        let chunks = known ? view.sortedSources.filter { !$0.skip }.map { (s: $0, b: max(view.surveys[$0.id]?.bytes ?? 1, 1)) } : []
+        let chunks = known ? view.sortedSources.filter { !$0.skip }.reversed().map { (s: $0, b: max(view.surveys[$0.id]?.bytes ?? 1, 1)) } : []
         let total = max(chunks.reduce(Int64(0)) { $0 + $1.b }, 1)
         TimelineView(.periodic(from: .now, by: view.runner.running && view.runner.remaining(at: .now) == nil ? 0.25 : 1)) { tl in
             let r = view.runner
@@ -708,7 +717,7 @@ struct AddButton: View {
                     Text("A whole drive").font(Typeface.text(12, .medium)).foregroundStyle(Palette.soft).padding(.bottom, 2)
                     ForEach(Volumes.mounted()) { v in
                         Button { open = false; view.add([URL(fileURLWithPath: v.path)]) } label: {
-                            HStack(spacing: 8) { Emoji(name: v.path == "/" ? "laptop" : "floppy_disk", size: 18); Text(v.name) }
+                            HStack(spacing: 8) { Emoji(name: v.path == "/" ? "laptop" : "gem_stone", size: 18); Text(v.name) }
                                 .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                         }.buttonStyle(.plain).padding(.vertical, 4)
                     }
@@ -729,21 +738,24 @@ struct AddButton: View {
 /// Fluent emoji for a drive: the Mac's own, an SSD, a disk that spins, a network share.
 func driveSymbol(_ d: Drive?) -> String {
     switch d?.kind {
-    case .ssd?: return d?.mountPoint == "/" || d?.mountPoint == "/System/Volumes/Data" ? "laptop" : "floppy_disk"
+    case .ssd?: return d?.mountPoint == "/" || d?.mountPoint == "/System/Volumes/Data" ? "laptop" : "gem_stone"
     case .spinning?, .unknown?: return "optical_disk"
     case .network?: return "globe_with_meridians"
-    case nil: return "floppy_disk"
+    case nil: return "gem_stone"
     }
 }
 
-func kindWords(_ d: Drive) -> String {
-    let fs = ["apfs": "APFS", "hfs": "Mac OS Extended", "exfat": "exFAT", "msdos": "FAT", "smbfs": "SMB"][d.fileSystem] ?? d.fileSystem
+func kindName(_ d: Drive) -> String {
     switch d.kind {
-    case .ssd: return "Solid state, \(fs)"
-    case .spinning: return "Spinning disk, \(fs)"
-    case .unknown: return "Probably spinning, \(fs)"
-    case .network: return "Network drive, \(fs)"
+    case .ssd: return "Solid state"
+    case .spinning: return "Spinning disk"
+    case .unknown: return "Unknown"
+    case .network: return "Network drive"
     }
+}
+
+func fileSystemName(_ d: Drive) -> String {
+    ["apfs": "APFS", "hfs": "Mac OS Extended", "exfat": "exFAT", "msdos": "FAT", "smbfs": "SMB"][d.fileSystem] ?? d.fileSystem
 }
 
 /// Measuring sources is housekeeping: background CPU (efficiency cores) and throttled disk reads,

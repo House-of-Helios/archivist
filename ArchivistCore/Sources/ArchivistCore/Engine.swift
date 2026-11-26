@@ -43,6 +43,8 @@ public struct Options: Sendable {
     /// sources are still ordered by their write barriers (no half files after a crash).
     public var finalFlush = true
     public var threads: Int?                 // the person's own number of copies at once; nil = chosen by the drives
+    /// Bench switch: run the big lane before the small one (one after the other). nil: the lanes decide.
+    public var bigFirst: Bool?
     /// A write barrier per batch of 64 files. Off: on a spinning disk each one is a journal flush
     /// and head moves (HFS+ image: 1.95 s vs 1.5 s for 3,000 files; ditto 0.8 s). Crash safety comes
     /// from the run lock instead: a run that died has everything it wrote copied again.
@@ -297,7 +299,10 @@ public final class Engine {
         lock.unlock()
         if lanes.diskOrder { small = sortedByDiskOffset(small) }
 
-        if lanes.together {
+        if let bigFirst = options.bigFirst {
+            if bigFirst { runLane(big, width: lanes.big, cloneOK: cloneOK); runLane(small, width: lanes.small, cloneOK: cloneOK) }
+            else { runLane(small, width: lanes.small, cloneOK: cloneOK); runLane(big, width: lanes.big, cloneOK: cloneOK) }
+        } else if lanes.together {
             let g = DispatchGroup()
             DispatchQueue.global().async(group: g) { self.runLane(small, width: lanes.small, cloneOK: cloneOK) }
             DispatchQueue.global().async(group: g) { self.runLane(big, width: lanes.big, cloneOK: cloneOK) }
