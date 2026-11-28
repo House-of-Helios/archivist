@@ -14,7 +14,7 @@ public struct Lanes: Sendable, Equatable {
 
     public static func choose(source: DriveKind, destination: DriveKind) -> Lanes {
         if source == .network || destination == .network {
-            return Lanes(small: 16, big: 1, together: true, diskOrder: false)       // §6: 11x at 16 in flight
+            return Lanes(small: 64, big: 2, together: true, diskOrder: false)       // §6; SMB/WiFi race: small 16 50 s, 32 37, 64 31, 128 28; big 1 35 s, 2 32 s (the link was full)
         }
         if source.seeks {
             return Lanes(small: 1, big: 1, together: false, diskOrder: true)        // §3b: disk order 2.7-4x
@@ -53,6 +53,9 @@ public struct Options: Sendable {
     /// and a half file from a crash is copied again (run lock). Replacements still go temp → rename.
     public var directNew = true
     public var callbackFrom: Int64 = 8 << 20  // files this big get the Stop callback (bench switch)
+    /// Small files written with Archivist's own few calls instead of copyfile. nil: on for a
+    /// network destination, where each call is a trip to the server (tests force it on).
+    public var trimmedWrites: Bool?
     /// Earlier versions. keepDeleted off: a file gone from the source is removed from the backup
     /// (a mirror). keepChanged off: a changed file is replaced in place.
     public var keepDeleted = true
@@ -87,9 +90,11 @@ public struct Report: Sendable {
     public var retired = 0
     public var unchanged = 0
     public var problems: [String] = []
+    public var failed: [String] = []      // relative paths of files that could not be copied (the window shows them apart)
     public var seconds = 0.0
     public var pastFolder: String?
     public var stopped = false
+    public var sourceGone = false         // the source drive went away mid-run: one message, not one per file
     public var sourceBytes: Int64 = 0     // everything the source holds (after leaving out): "Last backup: date, size"
 }
 
@@ -109,6 +114,7 @@ public final class Engine {
     private let lock = NSLock()
     private var progress = Progress()
     private var problems: [String] = []
+    private var failed: [String] = []
     private var retired = 0
     private var copied = 0
     private var copiedBytes: Int64 = 0
@@ -166,8 +172,12 @@ public final class Engine {
         // A source that is itself an Archivist backup keeps its own _Archive and .archivist: they
         // belong to that backup, so they are never copied (backing up a backup is normal; the
         // race found the old refusal copied nothing).
+        // The earlier names (_Past, _Archive) count as Archivist's only in a source that is itself
+        // a backup (it has .archivist): anywhere else they are the person's own folders (a race
+        // found a folder's own _Past left out of every backup).
+        let sourceIsBackup = FileManager.default.fileExists(atPath: source + "/" + Names.state)
         var srcScanner = TreeScanner(excluded: options.excluded,
-                                     skipRootNames: (source == src.mountPoint ? Drive.systemRootNames : []).union([Names.past, Names.state] + Names.legacyPasts))
+                                     skipRootNames: (source == src.mountPoint ? Drive.systemRootNames : []).union([Names.past, Names.state] + (sourceIsBackup ? Names.legacyPasts : [])))
         srcScanner.skipAppleDouble = fat.contains(src.fileSystem)
         srcScanner.patterns = options.patterns + Options.alwaysLeftOut
         // The destination skips exactly what the source skips (plus our own folders), so every
@@ -179,6 +189,15 @@ public final class Engine {
         srcScanner.shouldStop = { [unowned self] in self.isStopped }
         dstScanner.shouldStop = srcScanner.shouldStop
         let (srcEntries, srcProblems) = try srcScanner.scan(source)
+        sourceACLsScanned = srcScanner.askedACL
+        // An old archive folder at the destination stays untouched, unless the source has a
+        // folder of that name: then it is that folder's copy, and only the dated versions inside
+        // it are Archivist's own (left alone, never "gone from the source").
+        for name in Names.legacyPasts {
+            if srcEntries.contains(where: { $0.path == name }) {
+                dstScanner.excluded.formUnion(Past.versionNames(in: destination + "/" + name).map { name + "/" + $0 })
+            } else { dstScanner.skipRootNames.insert(name) }
+        }
         var (dstEntries, dstProblems) = FileManager.default.fileExists(atPath: destination) ? try dstScanner.scan(destination) : ([], [])
         problems += srcProblems
         problems += dstProblems
@@ -275,6 +294,8 @@ public final class Engine {
         progress.stage = .copying
         onProgress?(progress)
         let cloneOK = options.allowClone && src.canClone(to: dst)
+        trimmed = options.trimmedWrites ?? (dst.kind == .network)
+        _ = Engine.fileLimitRaised
 
         // Hard links: the first path of each inode is copied, the rest are linked to it after.
         var firstOfInode: [UInt64: String] = [:]
@@ -316,7 +337,8 @@ public final class Engine {
         if isStopped {   // stopped: finished files are already renamed whole; flush them and go
             fullSync(lockFD)
             report.copied = copied; report.bytes = copiedBytes; report.retired = retired
-            report.problems = problems; report.seconds = Date().timeIntervalSince(start); report.stopped = true
+            report.problems = problems; report.failed = failed; report.seconds = Date().timeIntervalSince(start); report.stopped = true
+            report.sourceGone = sourceGone
             report.pastFolder = retired > 0 ? pastFolder : nil
             return report
         }
@@ -326,11 +348,23 @@ public final class Engine {
         }
         for (e, first) in linkLater { link(e, to: firstOfInode[e.inode] ?? first) }
 
-        // Folder dates and metadata last (writing files inside changed them), deepest first.
-        for d in changes.dirs.reversed() {
-            let s = source + "/" + d.path, t = destination + "/" + d.path
-            if copyfile(s, t, nil, copyfile_flags_t(COPYFILE_METADATA | COPYFILE_NOFOLLOW)) != 0 {
-                note(ArchivistError.io("copyfile metadata", t, errno))
+        // Folder dates and metadata last (writing files inside changed them), deepest level
+        // first: a parent's mode or ACL may shut its children once applied. Within a level the
+        // folders go in parallel, as wide as the small lanes: one at a time, 41,893 folders over
+        // SMB on WiFi took longer than their 100k files.
+        let levels = Dictionary(grouping: changes.dirs) { $0.path.utf8.filter { $0 == UInt8(ascii: "/") }.count }
+        for depth in levels.keys.sorted(by: >) where !isStopped {
+            let dirs = levels[depth]!
+            let nextDir = NSLock(); var dirIndex = 0
+            TreeScanner.onThreads(max(1, min(lanes.small, dirs.count))) {
+                while !self.isStopped {
+                    nextDir.lock(); let i = dirIndex; dirIndex += 1; nextDir.unlock()
+                    guard i < dirs.count else { return }
+                    let s = self.source + "/" + dirs[i].path, t = self.destination + "/" + dirs[i].path
+                    if copyfile(s, t, nil, copyfile_flags_t(COPYFILE_METADATA | COPYFILE_NOFOLLOW)) != 0 {
+                        self.note(ArchivistError.io("copyfile metadata", t, errno))
+                    }
+                }
             }
         }
         if options.finalFlush { fullSync(lockFD) } else { barrierSync(lockFD) }
@@ -339,6 +373,7 @@ public final class Engine {
         report.bytes = copiedBytes
         report.retired = retired
         report.problems = problems
+        report.failed = failed
         report.seconds = Date().timeIntervalSince(start)
         report.stopped = isStopped
         report.pastFolder = retired > 0 ? pastFolder : nil
@@ -348,22 +383,169 @@ public final class Engine {
     // MARK: lanes
 
 
+    private var sourceACLsScanned = true
+    private var trimmed = false
+    private var sourceGone = false
+
+    /// A failed read: did the whole source go (a share dropped, a disk unplugged)? Then the run
+    /// stops with one message instead of a problem per file (28,061 seen for one pulled share).
+    private func sourceVanished() -> Bool {
+        guard access(source, F_OK) != 0 else { return false }
+        lock.lock(); let first = !sourceGone; sourceGone = true; lock.unlock()
+        if first { note(ArchivistError.refused("The source was disconnected partway. Start again when it is back.")) }
+        stop()
+        return true
+    }
+
+    /// 64 lanes each hold a source, a destination and a batch file open: past the 256 open
+    /// files a process starts with. Raised once to what the system allows.
+    static let fileLimitRaised: Bool = {
+        var l = rlimit()
+        guard getrlimit(RLIMIT_NOFILE, &l) == 0 else { return false }
+        l.rlim_cur = min(l.rlim_max, rlim_t(OPEN_MAX))
+        return setrlimit(RLIMIT_NOFILE, &l) == 0
+    }()
+
+    /// Whether the source itself refuses to be read (the file's problem) rather than the
+    /// destination refusing the write (the drive's problem): the window tells them apart.
+    static func cannotRead(_ path: String, kind: EntryKind) -> Bool {
+        if kind == .symlink {
+            var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
+            return readlink(path, &buf, buf.count) < 0
+        }
+        let fd = open(path, O_RDONLY | O_NOFOLLOW)
+        if fd < 0 { return true }
+        close(fd)
+        return false
+    }
+
+    /// The bits a new file's mode loses to this process's umask.
+    static let umaskBits: mode_t = { let m = umask(0); umask(m); return m }()
+
+    /// A small file in as few calls as the destination allows: create, write, its extended
+    /// attributes on the open file, its dates in one call, close. On a network drive each call
+    /// is a trip to the server, and copyfile made about a dozen per file (stat, statfs, lstat
+    /// twice, chmod twice…): a 5,265-file push over SMB on WiFi took 176 s with copyfile, 107 s
+    /// this way (bench/pushprobe.swift). Returns 0 or an errno; ERANGE means an attribute too big
+    /// for one piece (the caller copies attributes piece by piece then). Special mode bits, lock
+    /// flags and ACLs are the caller's, after the rename, as for copyfile.
+    static func writeSmall(from s: String, to t: String, exclusive: Bool) -> Int32 {
+        let a = open(s, O_RDONLY | O_NOFOLLOW)
+        guard a >= 0 else { return errno }
+        defer { close(a) }
+        var st = stat()
+        guard fstat(a, &st) == 0 else { return errno }
+        // Created writable by its owner: an SMB server marks a file made read-only (git's objects)
+        // read-only at once and refuses the writes. The real mode goes on last.
+        let b = open(t, O_WRONLY | O_CREAT | O_NOFOLLOW | (exclusive ? O_EXCL : O_TRUNC), (st.st_mode & 0o777) | S_IWUSR)
+        guard b >= 0 else { return errno }
+        let r = fill(a, b, st)
+        // A server may report a failed write only at close (write-behind): then the file is not whole.
+        if close(b) != 0 { let e = errno; return r != 0 ? r : e }
+        return r
+    }
+
+    private static func fill(_ a: Int32, _ b: Int32, _ st: stat) -> Int32 {
+        var buf = [UInt8](repeating: 0, count: Int(min(max(st.st_size, 4096), 1 << 20)))
+        while true {
+            let n = read(a, &buf, buf.count)
+            if n < 0 { return errno }
+            if n == 0 { break }
+            var off = 0
+            while off < n {
+                let w = buf.withUnsafeBytes { write(b, $0.baseAddress! + off, n - off) }
+                if w < 0 { return errno }
+                off += w
+            }
+        }
+        // Extended attributes, the ones copyfile would keep (xattr_preserve_for_intent).
+        let size = flistxattr(a, nil, 0, 0)
+        if size > 0 {
+            var raw = [CChar](repeating: 0, count: size)
+            let got = flistxattr(a, &raw, size, 0)
+            if got < 0 { return errno }
+            for name in raw[0..<got].split(separator: 0).map({ Array($0) + [0] }) {
+                guard xattr_preserve_for_intent(name, UInt32(XATTR_OPERATION_INTENT_COPY)) != 0 else { continue }
+                let len = fgetxattr(a, name, nil, 0, 0, 0)
+                if len < 0 { return errno }
+                var value = [UInt8](repeating: 0, count: len)
+                if fgetxattr(a, name, &value, len, 0, 0) != len { return ERANGE }
+                // A server with no room for attributes (a NAS, exFAT behind SMB): the file still
+                // arrives, as with copyfile, which skips what the destination cannot hold.
+                if fsetxattr(b, name, value, len, 0, 0) != 0, ![ENOTSUP, EPERM, EINVAL, ERANGE, E2BIG].contains(errno) { return errno }
+            }
+        }
+        let flags = st.st_flags & UInt32(UF_NODUMP | UF_OPAQUE | UF_HIDDEN)
+        if flags != 0 { _ = fchflags(b, flags) }   // best effort, as copyfile: many servers hold no flags
+        // Creation, modification and access dates in one call (written last: the data and the
+        // attributes would move them).
+        var list = attrlist()
+        list.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
+        list.commonattr = attrgroup_t(ATTR_CMN_CRTIME | ATTR_CMN_MODTIME | ATTR_CMN_ACCTIME)
+        var times = [st.st_birthtimespec, st.st_mtimespec, st.st_atimespec]
+        if fsetattrlist(b, &list, &times, MemoryLayout<timespec>.stride * 3, 0) != 0 {
+            // No creation date here (a server that keeps only two dates): modification and access at least.
+            var two = [st.st_atimespec, st.st_mtimespec]
+            if futimens(b, &two) != 0 { return errno }
+        }
+        let mode = st.st_mode & 0o777
+        if (mode & S_IWUSR == 0 || mode & umaskBits != 0), fchmod(b, mode) != 0 { return errno }
+        return 0
+    }
+
+    /// Extended attributes one by one; the resource fork in 64 KB pieces (the one attribute
+    /// macOS reads and writes by position). Returns the names that could not be copied.
+    static func copyAttributesInPieces(from s: String, to t: String) -> [String] {
+        let n = listxattr(s, nil, 0, XATTR_NOFOLLOW)
+        guard n > 0 else { return [] }
+        var raw = [CChar](repeating: 0, count: n)
+        guard listxattr(s, &raw, n, XATTR_NOFOLLOW) == n else { return ["(list)"] }
+        let names = raw.split(separator: 0).map { String(decoding: $0.map { UInt8(bitPattern: $0) }, as: UTF8.self) }
+        var failed: [String] = []
+        let piece = 64 << 10
+        var buf = [UInt8](repeating: 0, count: piece)
+        for name in names {
+            // The ones copyfile keeps: names macOS marks as not-for-copies (com.apple.macl…) are left.
+            guard xattr_preserve_for_intent(name, UInt32(XATTR_OPERATION_INTENT_COPY)) != 0 else { continue }
+            if name == XATTR_RESOURCEFORK_NAME {
+                var pos: UInt32 = 0, ok = true
+                while true {
+                    let got = getxattr(s, name, &buf, piece, pos, XATTR_NOFOLLOW)
+                    if got < 0 { ok = false; break }
+                    if got == 0 { break }   // a fork of exactly n pieces: nothing after the last
+                    if setxattr(t, name, buf, got, pos, XATTR_NOFOLLOW) != 0 { ok = false; break }
+                    if got < piece { break }
+                    pos += UInt32(got)
+                }
+                if !ok { failed.append(name) }
+            } else {
+                let size = getxattr(s, name, nil, 0, 0, XATTR_NOFOLLOW)
+                var value = [UInt8](repeating: 0, count: max(size, 0))
+                if size < 0 || getxattr(s, name, &value, size, 0, XATTR_NOFOLLOW) != size
+                    || setxattr(t, name, value, size, 0, XATTR_NOFOLLOW) != 0 { failed.append(name) }
+            }
+        }
+        return failed
+    }
+
     private func runLane(_ jobs: [Entry], width: Int, cloneOK: Bool) {
         guard !jobs.isEmpty else { return }
         var next = 0
         let nextLock = NSLock()
-        DispatchQueue.concurrentPerform(iterations: max(1, min(width, jobs.count))) { _ in
+        // Real threads, `width` of them: concurrentPerform stops at the core count (8 here), and a
+        // copy mostly waits on a drive or a network, so 16 lanes ran as 8.
+        TreeScanner.onThreads(max(1, min(width, jobs.count))) {
             var batch = Batch()
             while true {
                 nextLock.lock()
                 let i = next
                 next += 1
                 nextLock.unlock()
-                if i >= jobs.count || isStopped { break }
-                copyToTemp(jobs[i], cloneOK: cloneOK, into: &batch)
-                if batch.files.count >= 64 || batch.bytes >= 64 << 20 { commit(&batch) }
+                if i >= jobs.count || self.isStopped { break }
+                self.copyToTemp(jobs[i], cloneOK: cloneOK, into: &batch)
+                if batch.files.count >= 64 || batch.bytes >= 64 << 20 { self.commit(&batch) }
             }
-            commit(&batch)
+            self.commit(&batch)
         }
     }
 
@@ -386,6 +568,7 @@ public final class Engine {
         flags |= cloneOK ? COPYFILE_CLONE : (e.size >= 1 << 20 ? COPYFILE_DATA_SPARSE : 0)   // probe: CLONE's fallback drops holes
 
         var direct = options.directNew && newPaths.contains(e.path)
+        var attributesInPieces = false
         for attempt in 1...4 {
             let temp = direct ? target : dir + "/" + Names.tempPrefix + UUID().uuidString.prefix(8)
             report(current: e.path)
@@ -422,21 +605,46 @@ public final class Engine {
             var bsize = UInt32(min(max(e.size, 4096), 1 << 20))
             copyfile_state_set(state, UInt32(COPYFILE_STATE_BSIZE), &bsize)
             // Straight to its own name only if nothing is there (EXCL): never over a file that appeared.
-            if copyfile(s, temp, state, copyfile_flags_t(flags | (direct ? COPYFILE_EXCL : 0))) != 0 {
+            let copyFailed: Bool
+            if trimmed && !cloneOK && e.kind == .file && e.size < options.bigFile && !attributesInPieces {
+                let r = Engine.writeSmall(from: s, to: temp, exclusive: direct)
+                if r != 0 { errno = r }
+                copyFailed = r != 0
+            } else {
+                copyFailed = copyfile(s, temp, state, copyfile_flags_t(flags | (direct ? COPYFILE_EXCL : 0))) != 0
+            }
+            if copyFailed {
                 let err = errno
                 if direct && err == EEXIST { direct = false; continue }   // not ours: go the temp → rename way
                 unlink(temp)
+                // A server that won't hand over a big attribute in one piece (a folder's custom
+                // icon: a 400 KB resource fork, over SMB from macOS 27): the data alone, then
+                // the attributes piece by piece.
+                if err == ERANGE && !attributesInPieces {
+                    attributesInPieces = true
+                    flags &= ~COPYFILE_XATTR
+                    continue
+                }
                 if err == ENOSPC || err == EDQUOT {   // the destination filled up: stop, don't fail file after file
                     if !isStopped { note(ArchivistError.refused("The destination is full; stopped.")) }
                     stop()
                     return
                 }
-                if !isStopped { note(ArchivistError.io("copy", e.path, err)) }
+                if sourceVanished() { return }
+                if !isStopped {
+                    note(ArchivistError.io("copy", e.path, err))
+                    if Engine.cannotRead(s, kind: e.kind) { lock.lock(); failed.append(e.path); lock.unlock() }
+                }
                 return
+            }
+            if attributesInPieces {
+                for name in Engine.copyAttributesInPieces(from: s, to: temp) {
+                    note(ArchivistError.refused("\(e.path): its \(name) attribute could not be copied; the file is copied without it"))
+                }
             }
             // The file must not have changed while it was read (rclone's rule).
             var after = stat()
-            if lstat(s, &after) != 0 { note(ArchivistError.io("lstat", s, errno)); unlink(temp); return }
+            if lstat(s, &after) != 0 { unlink(temp); if !sourceVanished() { note(ArchivistError.io("lstat", s, errno)) }; return }
             let mtime = Double(after.st_mtimespec.tv_sec) + Double(after.st_mtimespec.tv_nsec) / 1e9
             if (e.kind == .file && after.st_size != e.size) || abs(mtime - e.mtime) > 0.000_001 {
                 unlink(temp)
@@ -449,7 +657,9 @@ public final class Engine {
             // Lock flags off on the temp; restored after the rename with the ACL.
             let locked = after.st_flags & UInt32(UF_IMMUTABLE | UF_APPEND | SF_IMMUTABLE | SF_APPEND) != 0
             if locked { lchflags(temp, 0) }
-            let hasACL = e.hasACL   // read by the scan: a separate check cost a head move per file on a spinning disk
+            // Read by the scan (a separate check cost a head move per file on a spinning disk); a
+            // network scan skips it, so it is looked up here, for copied files only.
+            let hasACL = sourceACLsScanned ? e.hasACL : TreeScanner.hasACL(s)
             // Until its ACL is on, a file whose ACL limits access stays private to the owner.
             if hasACL { lchmod(temp, 0o600) }
             // One open file per batch carries the write barrier; opening every temp again cost a
@@ -708,6 +918,11 @@ public struct Survey: Sendable {
     public var bigBytesToCopy: Int64 = 0     // bytes of files at or above it
     public var destinationExists = false
     public var compared = true             // false: only the source's size is known so far
+    /// Files still to copy, path → modification time, so the window can tell live files (changed
+    /// since the last backup started) and unreadable ones from real gaps.
+    /// shortcut: filled only up to `pendingLimit` files; past that the window shows the plain count.
+    public var pending: [String: Double] = [:]
+    public static let pendingLimit = 2000
 
     /// Just the source's size: a local scan, quick, so the window can size things before the
     /// (possibly slow) comparison with the destination finishes.
@@ -724,14 +939,24 @@ public struct Survey: Sendable {
         return s
     }
 
-    public static func of(source: String, destination: String, excluded: Set<String> = [], patterns: [String] = [], stop: (() -> Bool)? = nil) throws -> Survey {
+    /// One walk of the source serves both: `onSize` gets the size as soon as the source is
+    /// walked, before the (possibly slow) destination walk; `onCount` the files found so far.
+    public static func of(source: String, destination: String, excluded: Set<String> = [], patterns: [String] = [], stop: (() -> Bool)? = nil,
+                          onSize: ((Survey) -> Void)? = nil, onCount: ((Int) -> Void)? = nil) throws -> Survey {
         var s = Survey()
-        var src = TreeScanner(excluded: excluded)
+        // The same root names the run leaves out: a source that is itself a backup keeps its own
+        // archive out, a whole drive its system folders (or the row counts files never copied).
+        let sourceIsBackup = FileManager.default.fileExists(atPath: source + "/" + Names.state)
+        let wholeDrive = (try? Drive.of(path: source))?.mountPoint == source
+        var src = TreeScanner(excluded: excluded,
+                              skipRootNames: (wholeDrive ? Drive.systemRootNames : []).union([Names.past, Names.state] + (sourceIsBackup ? Names.legacyPasts : [])))
         src.patterns = patterns + Options.alwaysLeftOut
         src.shouldStop = stop
+        src.onCount = onCount
         let (entries, _) = try src.scan(source)
         if stop?() == true { throw CancellationError() }
         for e in entries where e.kind == .file { s.files += 1; s.bytes += e.size }
+        if let onSize { var size = s; size.compared = false; onSize(size) }
         s.destinationExists = FileManager.default.fileExists(atPath: destination)
         guard s.destinationExists else {
             let files = entries.filter { $0.kind != .directory }, bigFile = Options().bigFile
@@ -740,7 +965,12 @@ public struct Survey: Sendable {
             s.bigBytesToCopy = files.filter { $0.size >= bigFile }.reduce(0) { $0 + $1.size }
             return s
         }
-        var dst = TreeScanner(skipRootNames: Set([Names.past, Names.state] + Names.legacyPasts))
+        var dst = TreeScanner(skipRootNames: [Names.past, Names.state])
+        for name in Names.legacyPasts {   // as the run: see Engine.run
+            if entries.contains(where: { $0.path == name }) {
+                dst.excluded.formUnion(Past.versionNames(in: destination + "/" + name).map { name + "/" + $0 })
+            } else { dst.skipRootNames.insert(name) }
+        }
         dst.patterns = patterns + Options.alwaysLeftOut
         dst.shouldStop = stop
         let (dEntries, _) = try dst.scan(destination)
@@ -749,6 +979,7 @@ public struct Survey: Sendable {
         let c = Compare.changes(source: entries, destination: dEntries, mtimeWindow: window)
         s.toCopy = c.copy.count
         s.bytesToCopy = c.bytes
+        if c.copy.count <= Survey.pendingLimit { for e in c.copy { s.pending[e.path] = e.mtime } }
         let bigFile = Options().bigFile
         s.smallToCopy = c.copy.filter { $0.size < bigFile }.count
         s.bigBytesToCopy = c.copy.filter { $0.size >= bigFile }.reduce(0) { $0 + $1.size }

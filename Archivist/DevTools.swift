@@ -168,6 +168,17 @@ enum DevControl {
             let o = r?.overall
             var d: [String: Any] = ["title": j.title, "id": j.id.uuidString, "destination": j.destination ?? "",
                                     "sources": j.sources.map(\.path), "lastResult": j.lastResult ?? "", "schedule": j.schedule.words]
+            // Each source row as the window reads it: size, what is still to copy, and whether what is
+            // left is only live or unreadable files (shown "up to date" with an info dot).
+            d["rows"] = j.sources.map { s -> [String: Any] in
+                var row: [String: Any] = ["name": s.name, "skip": s.skip]
+                if let v = store.surveys[s.id] {
+                    row["bytes"] = v.bytes; row["files"] = v.files; row["toCopy"] = v.toCopy; row["bytesToCopy"] = v.bytesToCopy
+                    row["compared"] = v.compared; row["pending"] = v.pending.count
+                }
+                if let q = SourceRow.settled(job: j, source: s, survey: store.surveys[s.id]) { row["settled"] = ["live": q.live, "unreadable": q.unreadable.count] }
+                return row
+            }
             if let r, r.running, let o {
                 d["running"] = ["files": o.files, "filesTotal": o.filesTotal, "bytes": o.bytes, "bytesTotal": o.bytesTotal,
                                 "mbPerSecond": r.bytesPerSecond / 1e6, "source": r.currentSource ?? "",

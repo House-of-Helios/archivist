@@ -13,7 +13,9 @@ if [ -f "$K" ] && [ -f "$ROOT/_devdata/signing/keychain-password" ]; then
   trap 'security lock-keychain "$K" 2>/dev/null' EXIT
   # Hardened runtime on Release (no library injection into an app that may hold Full Disk Access).
   # Not on Debug: Xcode's Archivist.debug.dylib fails library validation under a team-less certificate.
-  RUNTIME=""; [ "${CONFIGURATION:-Release}" = "Release" ] && RUNTIME="--options runtime"
+  # Decided from the bundle, not $CONFIGURATION: a Debug app signed with runtime crashed at launch
+  # ("different Team IDs") when the variable wasn't set (2026-11-28).
+  RUNTIME="--options runtime"; ls "$APP"/Contents/MacOS/*.debug.dylib >/dev/null 2>&1 && RUNTIME=""
   codesign --force --deep $RUNTIME --keychain "$K" -s Archivist "$APP"
 else
   echo "warning: no Archivist signing keychain; signing ad hoc (macOS will re-ask permissions after each build)"

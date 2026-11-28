@@ -20,6 +20,12 @@ public enum Past {
         return f
     }()
 
+    /// The dated version folders directly under `root`: Archivist's own, whatever the root is
+    /// called (an earlier release called it _Past or _Archive).
+    public static func versionNames(in root: String) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []).filter { stampFormat.date(from: $0) != nil }
+    }
+
     /// Every dated folder under `root`, newest first, with its file count and size.
     /// `backup`: the folder holding the current copies (the destination). A file in a version
     /// that the backup still has is an earlier version of it; one it lacks was deleted.

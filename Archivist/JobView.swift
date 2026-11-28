@@ -14,7 +14,9 @@ struct JobView: View {
     var runnerOverride: Runner? = nil                  // snapshots
     var runner: Runner { runnerOverride ?? store.runner(for: jobID) }
     @State var interrupted = false
-    @State var measuring = false                       // sources being walked: Start waits for the numbers
+    @State var measuring = false                       // sources being walked
+    @State var counted: [Source.ID: Int] = [:]         // files found so far by the walk under way
+    @State var refreshTask: Task<Void, Never>?         // the one walk under way; a new one cancels it
     @State var destinationState: DestinationState = .present
     enum DestinationState { case present, folderMissing, driveMissing }
     @State var drives: [String: Drive] = [:]          // path → drive, looked up off the main thread
@@ -97,7 +99,8 @@ struct JobView: View {
         .animation(.easeOut(duration: 0.15), value: showingProblems)
         .onReceive(NotificationCenter.default.publisher(for: .showSettings)) { _ in showingSettings = true }
         .onExitCommand { showingSettings = false }
-        .task(id: refreshKey) { await refresh() }
+        .onChange(of: refreshKey, initial: true) { kick() }
+        .onDisappear { refreshTask?.cancel() }
         .task(id: job.destination) {
             // The destination's presence is checked every 3 s on its own: one look, no walk, so a
             // renamed folder or an unplugged drive shows within seconds (not at the next measuring).
@@ -107,7 +110,7 @@ struct JobView: View {
                 let now = await JobView.where_(d)
                 if now != destinationState {
                     destinationState = now
-                    if now == .present { await refresh() }   // back again: measure what is there
+                    if now == .present { kick() }   // back again: measure what is there
                 }
             }
         }
@@ -118,13 +121,13 @@ struct JobView: View {
             // folder changes all the time: so at most one recheck per 2 minutes, and none while
             // Archivist is in the background (coming back to it rechecks).
             for await _ in FolderWatch.changes(of: watchPaths) where !runner.running {
-                guard NSApp.isActive, Date().timeIntervalSince(JobView.lastCheck) > 120 else { continue }
-                await refresh()
+                guard NSApp.isActive, Date().timeIntervalSince(JobView.lastCheck) > 120, !measuring else { continue }
+                kick()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            guard !runner.running, Date().timeIntervalSince(JobView.lastCheck) > 120 else { return }
-            Task { await refresh() }
+            guard !runner.running, Date().timeIntervalSince(JobView.lastCheck) > 120, !measuring else { return }
+            kick()
         }
     }
 
@@ -134,9 +137,9 @@ struct JobView: View {
         job.sources.map { "\($0.path)|\($0.skip)|\($0.namesLeftOut)" }.joined() + (job.destination ?? "") + (job.lastResult ?? "") + "\(runner.running)"
     }
 
-    private var watchPaths: [String] {
-        job.sources.map(\.readPath) + (job.destination.map { [$0, ($0 as NSString).deletingLastPathComponent] } ?? [])
-    }
+    /// Sources only: the destination changes only through Archivist (and its presence is
+    /// checked every 3 s), and watching it re-walked every source every 2 minutes all night.
+    private var watchPaths: [String] { job.sources.map(\.readPath) }
     private var watchKey: String { watchPaths.joined(separator: "|") }
 
     /// Is the destination there, or is its folder or its whole drive gone? One look, no walk.
@@ -163,9 +166,11 @@ struct JobView: View {
     @MainActor static var lastCheck = Date.distantPast
 
     func refresh() async {
-        guard !preset, !runner.running else { return }   // a running backup walks the tree itself
+        measuring = false   // a cancelled walk left it set; a backup under way walks the tree itself
+        guard !preset, !runner.running else { return }
         JobView.lastCheck = Date()
         let j = job
+        Access.shared.touch(j.sources.map(\.readPath))   // any permission popup shows now, not after Start
         var paths = j.sources.map(\.readPath)
         if let d = j.destination { paths.append(d) }
         for p in paths where drives[p] == nil {
@@ -191,36 +196,47 @@ struct JobView: View {
                 return pid == me ? !busy : kill(pid, 0) != 0 && errno != EPERM
             }
         }.value
-        // Sizes first (local, quick): the bar and rows are right at once; then the comparison
-        // with the destination, which can be slow on a busy or spinning drive.
-        // An edit or Start cancels this refresh: its walks stop too, or each edit stacked one more
-        // walk of the same trees and they crawled on together for many minutes.
+        // One walk per source: its size shows as soon as the source is walked, then the
+        // comparison with the destination. An edit or Start cancels the walk (kick), so walks
+        // never stack, and a backup started now walks the tree once, itself.
         measuring = true
         defer { if !Task.isCancelled { measuring = false } }
-        for s in j.sources where store.surveys[s.id] == nil {
+        let store = store
+        for s in j.sources {
             let t = Date()
-            if let size = await JobView.walk({ stop in try Survey.size(of: s.readPath, excluded: j.excluded(in: s), patterns: s.namesLeftOut, stop: stop) }) {
-                store.surveys[s.id] = size
-                DevLog.write(String(format: "sized: %@, %d files, %.1f s", s.name, size.files, Date().timeIntervalSince(t)))
-            }
-            if Task.isCancelled { return }
-        }
-        for s in j.sources where !s.skip {   // an Exclude row is never compared: it isn't copied
-            let target = j.target(for: s) ?? "/nonexistent-archivist-destination"
-            let t = Date()
-            if let full = await JobView.walk({ stop in try Survey.of(source: s.readPath, destination: target, excluded: j.excluded(in: s), patterns: s.namesLeftOut, stop: stop) }) {
-                store.surveys[s.id] = full
-                DevLog.write(String(format: "counted: %@, %d files, %d to copy, %.1f s", s.name, full.files, full.toCopy, Date().timeIntervalSince(t)))
+            if s.skip {   // an Exclude row is never compared: it isn't copied
+                guard store.surveys[s.id] == nil else { continue }
+                if let size = await JobView.walk({ stop in try Survey.size(of: s.readPath, excluded: j.excluded(in: s), patterns: s.namesLeftOut, stop: stop) }) {
+                    store.surveys[s.id] = size
+                }
+            } else {
+                let target = j.target(for: s) ?? "/nonexistent-archivist-destination"
+                let count = $counted
+                let full = await JobView.walk({ stop in
+                    try Survey.of(source: s.readPath, destination: target, excluded: j.excluded(in: s), patterns: s.namesLeftOut, stop: stop,
+                                  onSize: { size in DispatchQueue.main.async { if store.surveys[s.id]?.compared != true { store.surveys[s.id] = size } } },
+                                  onCount: { n in DispatchQueue.main.async { count.wrappedValue[s.id] = n } })
+                })
+                counted[s.id] = nil
+                if let full {
+                    store.surveys[s.id] = full
+                    DevLog.write(String(format: "counted: %@, %d files, %d to copy, %.1f s", s.name, full.files, full.toCopy, Date().timeIntervalSince(t)))
+                }
             }
             if Task.isCancelled { return }
         }
     }
 
-    /// Start can go once every source has its size (local, quick), or the walking is over (a walk
-    /// that failed must not hold Start back forever). Not the comparison: the backup compares for
-    /// itself, and Start cancels this one, so the destination is never walked twice for one run.
+    /// The one way to start a walk: the walk under way, if any, is cancelled first.
+    func kick() {
+        refreshTask?.cancel()
+        refreshTask = Task { await refresh() }
+    }
+
+    /// Every source compared, or the walking is over. Start never waits for it: the backup
+    /// walks the trees itself, and Start cancels this walk, so nothing is walked twice.
     var measured: Bool {
-        !measuring || job.sources.filter { !$0.skip }.allSatisfy { surveys[$0.id] != nil }
+        !measuring || job.sources.filter { !$0.skip }.allSatisfy { surveys[$0.id]?.compared == true }
     }
 
     /// A walk off the main thread, quiet, that stops when the task awaiting it is cancelled.
@@ -242,12 +258,14 @@ struct JobView: View {
     // MARK: actions
 
     func backUp() {
+        Access.shared.touch(job.sources.filter { !$0.skip }.map(\.readPath))
         let live = job.sources.filter { !$0.skip }.compactMap { surveys[$0.id] }.filter(\.compared)
         store.start(job.id, planned: (live.reduce(0) { $0 + $1.toCopy }, live.reduce(0) { $0 + $1.bytesToCopy }))
     }
 
     func add(_ urls: [URL]) {
         edit { _ = $0.addSources(urls.map(\.path)) }
+        Access.shared.touch(urls.map(\.path))
     }
 
     func chooseFolders() {
@@ -275,6 +293,7 @@ struct JobView: View {
     func setDestination(_ path: String) {
         edit { j in
             j.destination = path
+            j.lastStart = nil; j.lastSkipped = [:]   // what the last backup found belongs to the old destination
             if !j.lookChosen { let l = Contrast.look(for: path, pool: Job.icons); j.icon = l.icon; j.color = l.color }
         }
     }
@@ -315,7 +334,10 @@ struct SourcesPane: View {
                         .lineLimit(1)
                         .offset(y: 1.5)
                 }
-                if !view.runner.running && !view.runner.problems.isEmpty {   // something wasn't copied: a click opens the list
+                // Something wasn't copied: a click opens the list. Files that only could not be read are
+                // named by the source row's info dot instead; a warning for them read as a failure.
+                let unreadable = view.runner.finished?.skipped.values.reduce(0) { $0 + $1.count } ?? 0
+                if !view.runner.running && view.runner.problems.count > unreadable {
                     Button { NotificationCenter.default.post(name: .showProblems, object: nil) } label: { Emoji(name: "warning", size: 16) }
                         .buttonStyle(.plain).help("Some files weren't copied").offset(y: 1.5)
                 }
@@ -361,22 +383,40 @@ struct SourceRow: View {
     static let height: CGFloat = 64
     let view: JobView
     let source: Source
+    @State private var finderIcon: NSImage?
 
     var body: some View {
         let s = source
         HStack(spacing: 14) {
             Group {
-                if s.hasCustomIcon {   // the person's own Finder icon, as Finder shows it
-                    Image(nsImage: NSWorkspace.shared.icon(forFile: s.path)).resizable().interpolation(.high).frame(width: 40, height: 40)
+                if s.hasCustomIcon, let finderIcon {   // the person's own Finder icon, as Finder shows it
+                    Image(nsImage: finderIcon).resizable().interpolation(.high).frame(width: 40, height: 40)
                 } else {
                     Badge(icon: s.isDrive ? driveSymbol(view.drive(s.readPath)) : s.icon, hex: s.color, size: 38)
                 }
             }
+                .overlay(alignment: .bottomTrailing) {   // a folder on a network share wears the globe, smaller than the destination's
+                    if !s.isDrive, view.drive(s.readPath)?.kind == .network {
+                        Emoji(name: "globe_with_meridians", size: 14).padding(2).background(Circle().fill(Palette.raised))
+                            .offset(x: 5, y: 3)
+                    }
+                }
                 .opacity(s.skip ? 0.4 : 1)
                 .background(Splash(hex: s.color, addedAt: s.addedAt))
+                // Read once, off the main thread: on a network drive each look is a trip to the
+                // server, and the row redraws often (the count while walking); on the main
+                // thread it froze the window.
+                .task(id: s.path) {
+                    guard s.hasCustomIcon else { return }
+                    let path = s.path
+                    finderIcon = await Task.detached { NSWorkspace.shared.icon(forFile: path) }.value
+                }
             VStack(alignment: .leading, spacing: 3) {
                 Text(s.name).font(Typeface.text(15, .semibold)).foregroundStyle(Palette.ink.opacity(s.skip ? 0.5 : 1))
-                Text(status).font(Typeface.text(12.5)).foregroundStyle(statusColor).lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(status).font(Typeface.text(12.5)).foregroundStyle(statusColor).lineLimit(1)
+                    if let q = settled { InfoDot(live: q.live, unreadable: q.unreadable) }
+                }
             }
             Spacer(minLength: 8)
             // Three choices for the row itself. Exclude: this folder is not copied, and an Include
@@ -411,11 +451,33 @@ struct SourceRow: View {
 
     private var survey: Survey? { view.surveys[source.id] }
 
+    /// Everything still to copy is either live (changed after the last finished backup started:
+    /// files an app keeps open, like logs and databases) or could not be read last time. Then the
+    /// folder is backed up, and saying "not backed up yet" in red read as a failure (Helios, 2026-11-28).
+    private var settled: (live: Int, unreadable: [String])? { SourceRow.settled(job: view.job, source: source, survey: survey) }
+
+    static func settled(job: Job, source: Source, survey: Survey?) -> (live: Int, unreadable: [String])? {
+        guard let v = survey, v.compared, v.destinationExists, v.toCopy > 0, v.pending.count == v.toCopy,
+              let start = job.lastStart?.timeIntervalSince1970, let end = job.lastRun?.timeIntervalSince1970 else { return nil }
+        let skipped = Set(job.lastSkipped[source.id.uuidString] ?? [])
+        var live = 0, unreadable: [String] = []
+        for (path, mtime) in v.pending {
+            if mtime > end + 2 { return nil }   // changed after the backup ended: a real change, the plain red count
+            if skipped.contains(path) { unreadable.append(path) }
+            else if mtime >= start - 2 { live += 1 }   // changed while the backup ran (2 s: dates are rounded)
+            else { return nil }   // older than the backup yet not copied: not a live file
+        }
+        return (live, unreadable.sorted())
+    }
+
+
     private var status: String {
+        if Access.shared.isWaiting(source.readPath) { return "Waiting for your OK" }   // the bottom line says where
         if source.skip { return survey.map { "\(bytes($0.bytes)), excluded" } ?? "Excluded" }
-        guard let v = survey else { return "Calculating…" }
+        guard let v = survey else { return view.counted[source.id].map { "Calculating… \($0.formatted()) files" } ?? "Calculating…" }
         let size = bytes(v.bytes)
         if !v.compared { return "\(size), calculating…" }
+        if settled != nil { return "\(size), up to date" }
         if !v.destinationExists { return "\(size), not backed up yet" }
         if v.toCopy == 0 { return "\(size), up to date" }
         if v.bytesToCopy >= v.bytes { return "\(size), not backed up yet" }   // everything is new: the same size twice says nothing
@@ -423,7 +485,9 @@ struct SourceRow: View {
     }
 
     private var statusColor: Color {
+        if Access.shared.isWaiting(source.readPath) { return Palette.warn }
         guard let v = survey, v.compared, !source.skip else { return Palette.soft }
+        if settled != nil { return Palette.good }
         return !v.destinationExists || v.toCopy > 0 ? Palette.due : Palette.good   // red: still to copy; green: up to date
     }
 
@@ -480,7 +544,7 @@ struct DestinationPane: View {
                     Badge(icon: job.icon, hex: job.color, size: compact ? 44 : 66)
                         .overlay(alignment: .bottomTrailing) {
                             if let d {
-                                Emoji(name: driveSymbol(d), size: 22).padding(3).background(Circle().fill(Palette.raised))
+                                Emoji(name: driveSymbol(d), size: 14).padding(2).background(Circle().fill(Palette.raised))   // same size as a source's globe
                                     .overlay(alignment: .trailing) {   // the drive's kind, hung off the badge's right
                                         Text(kindName(d)).font(Typeface.text(12.5)).foregroundStyle(Palette.soft)
                                             .fixedSize().alignmentGuide(.trailing) { t in t[.leading] - 4 }
@@ -512,7 +576,7 @@ struct DestinationPane: View {
                         Button(view.runner.stopping ? "Stopping…" : "Stop") { view.runner.stop() }.buttonStyle(QuietButton())
                             .disabled(view.runner.stopping)
                     } else {
-                        Button("Start backup", action: view.backUp).buttonStyle(PrimaryButton()).disabled(!job.ready || view.destinationState != .present || !view.measured)
+                        Button("Start backup", action: view.backUp).buttonStyle(PrimaryButton()).disabled(!job.ready || view.destinationState != .present)
                             .keyboardShortcut(.return, modifiers: .command)
                     }
                 }
@@ -589,7 +653,7 @@ struct Missing: View {
             if view.destinationState == .folderMissing {
                 Button("Create it again") {
                     try? FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: false)
-                    Task { await view.refresh() }
+                    view.kick()
                 }.buttonStyle(PrimaryButton())
             }
             Button("Change location", action: view.chooseDestination).buttonStyle(QuietButton())
@@ -710,7 +774,7 @@ struct BottomBar: View {
                         let done = r.finishing || pct >= 100
                         HStack(spacing: 0) {
                             Text(done || estimating ? "" : "~\(Runner.clock(left ?? 0)) left  //  ").frame(maxWidth: .infinity, alignment: .trailing)
-                            Text(done ? "Finishing…" : estimating ? "Calculating…" : "\(pct)% done").fontWeight(.semibold).fixedSize()
+                            Text(Access.shared.anyWaiting ? "Waiting for your OK" : done ? "Finishing…" : estimating ? "Calculating…" : "\(pct)% done").fontWeight(.semibold).fixedSize()
                             Text("  //  \(Runner.clock(r.elapsed)) elapsed").frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .font(Typeface.number(12.5)).foregroundStyle(Palette.ink)
@@ -718,6 +782,7 @@ struct BottomBar: View {
                     } else {
                         Text(r.stopping ? "Stopping…"
                              : !(job.ready && view.destinationState == .present) ? " "
+                             : Access.shared.anyWaiting ? Access.message
                              : view.measured ? "Ready to start" : "Calculating…")
                             .font(Typeface.text(12))
                             .foregroundStyle(r.running ? Palette.ink : Palette.soft)
@@ -1170,4 +1235,74 @@ struct ScheduleChooser: View {
 extension Notification.Name {
     static let showSettings = Notification.Name("ArchivistShowSettings")
     static let showProblems = Notification.Name("ArchivistShowProblems")
+}
+
+/// A small ⓘ beside a status: what was left out, in plain words, and the files on request.
+struct InfoDot: View {
+    let live: Int
+    let unreadable: [String]
+    @State private var open = false
+
+    var body: some View {
+        Button { open.toggle() } label: { Image(systemName: "info.circle").font(.system(size: 12)) }
+            .buttonStyle(.plain).foregroundStyle(Palette.soft)
+            .help(InfoCard.lines(live: live, unreadable: unreadable).joined(separator: " "))
+            // A sheet, not a popover: a popover hung below the row and the open file list ran out of the window.
+            .sheet(isPresented: $open) { InfoCard(live: live, unreadable: unreadable, onDone: { open = false }) }
+    }
+}
+
+struct InfoCard: View {
+    let live: Int
+    let unreadable: [String]
+    var onDone: (() -> Void)? = nil
+    @State var showFiles = false
+
+    static func lines(live: Int, unreadable: [String]) -> [String] {
+        var l: [String] = []
+        if live > 0 {
+            l.append(live == 1 ? "1 file was in use and changed during the backup. It will be copied next time."
+                               : "\(live) files were in use and changed during the backup. They will be copied next time.")
+        }
+        if !unreadable.isEmpty {
+            l.append((unreadable.count == 1 ? "1 file couldn't be read, so it was skipped." : "\(unreadable.count) files couldn't be read, so they were skipped.")
+                     + " Usually a file another app keeps locked, or a shortcut that points nowhere.")
+        }
+        return l
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Everything else is backed up.").font(Typeface.text(13.5, .semibold))
+            ForEach(InfoCard.lines(live: live, unreadable: unreadable), id: \.self) { Text($0) }
+            if !unreadable.isEmpty {
+                Button(showFiles ? "Hide files" : "Show files") { withAnimation(.easeInOut(duration: 0.2)) { showFiles.toggle() } }
+                    .buttonStyle(.plain).foregroundStyle(Palette.accent).font(Typeface.text(12.5, .semibold))
+                if showFiles {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(unreadable, id: \.self) { path in
+                                let folder = (path as NSString).deletingLastPathComponent
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text((path as NSString).lastPathComponent).font(Typeface.text(12.5, .semibold))
+                                    Text(folder.isEmpty ? "in the top folder" : "in " + folder)
+                                        .font(Typeface.text(11)).foregroundStyle(Palette.soft)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 140)
+                }
+            }
+            if let onDone {
+                HStack { Spacer(); Button("Done", action: onDone).buttonStyle(QuietButton()).keyboardShortcut(.defaultAction) }
+            }
+        }
+        .font(Typeface.text(12.5)).foregroundStyle(Palette.ink)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: 320, alignment: .leading).padding(16)
+        .background(Palette.raised)
+    }
 }

@@ -67,6 +67,7 @@ enum Snapshot {
         ]
         let sheets: [(String, AnyView, CGSize)] = [
             ("settings", AnyView(SettingsSheet(view: JobView(storeOverride: store, jobID: studio.id, runnerOverride: Runner(), destinationState: .present, drives: drives, presetSurveys: surveys, space: nil, preset: true))), CGSize(width: SettingsSheet.width, height: 760)),
+            ("info-card", AnyView(InfoCard(live: 3, unreadable: ["Art Line NYC/apps/web/.env", "The House/build/SourcePackages/checkouts/swift-argument-parser/Plugins/GenerateManual/GenerateCommon", "Icon"], showFiles: true)), CGSize(width: 352, height: 420)),
             ("update-sheet", AnyView(UpdateSheet(update: update, current: "0.0.1", onLater: {}, onInstall: {})), CGSize(width: 480, height: 420)),
         ]
         for (name, dark) in [("dark", true), ("light", false)] {

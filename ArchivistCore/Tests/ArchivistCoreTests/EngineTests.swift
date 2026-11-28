@@ -153,11 +153,13 @@ final class EngineTests: XCTestCase {
 
     func testRoundTripKeepsEveryMacDetail() throws {
         buildFixture()
-        for clone in [false, true] {
+        // clone, copyfile, and the trimmed writer a network destination gets: each keeps every detail.
+        for (clone, trimmed) in [(false, false), (true, false), (false, true)] {
             try? FileManager.default.removeItem(atPath: dst)
             try FileManager.default.createDirectory(atPath: dst, withIntermediateDirectories: true)
             var o = Options()
             o.allowClone = clone
+            o.trimmedWrites = trimmed
             let r = try backup(o)
             XCTAssertEqual(r.problems, [], "clone \(clone)")
             XCTAssertEqual(allPaths(src), allPaths(dst), "clone \(clone)")
@@ -398,6 +400,18 @@ final class EngineTests: XCTestCase {
         XCTAssertFalse(b.entries.contains { $0.path.contains("node_modules") })
     }
 
+    func testOneFileACLLookupMatchesTheScan() throws {
+        write("plain.txt", "p")
+        write("acl.txt", "a")
+        sh("/bin/chmod", "+a", "everyone deny delete", src + "/acl.txt")
+        XCTAssertTrue(TreeScanner.hasACL(src + "/acl.txt"))
+        XCTAssertFalse(TreeScanner.hasACL(src + "/plain.txt"))
+        var s = TreeScanner()
+        let found = try s.scan(src).entries
+        XCTAssertTrue(s.askedACL, "a local scan reads ACLs itself")
+        XCTAssertEqual(found.first { $0.path == "acl.txt" }?.hasACL, true)
+    }
+
     func testStoppedSurveyGivesNoNumber() {
         write("a.txt", "aaaa")
         XCTAssertThrowsError(try Survey.size(of: src, stop: { true }))
@@ -446,6 +460,42 @@ final class EngineTests: XCTestCase {
         XCTAssertTrue(Schedule.whenConnected.isDue(now: at(12, 0), lastRun: at(9, 0), destinationSince: at(11, 50), calendar: cal))
         XCTAssertFalse(Schedule.whenConnected.isDue(now: at(12, 0), lastRun: at(11, 55), destinationSince: at(11, 50), calendar: cal), "once per connection")
         XCTAssertFalse(Schedule.byHand.isDue(now: at(12, 0), lastRun: nil, destinationSince: here, calendar: cal))
+    }
+
+    func testAttributesCopiedInPiecesMatchTheOriginal() throws {
+        write("Icon\r", "")
+        write("copy", "")
+        let fork = (0..<412_000).map { UInt8(truncatingIfNeeded: $0 &* 31) }   // a custom folder icon's size
+        let info = [UInt8](repeating: 7, count: 32)
+        XCTAssertEqual(setxattr(src + "/Icon\r", XATTR_RESOURCEFORK_NAME, fork, fork.count, 0, XATTR_NOFOLLOW), 0)
+        XCTAssertEqual(setxattr(src + "/Icon\r", "com.apple.FinderInfo", info, info.count, 0, XATTR_NOFOLLOW), 0)
+        XCTAssertEqual(Engine.copyAttributesInPieces(from: src + "/Icon\r", to: src + "/copy"), [])
+        func read(_ name: String) -> [UInt8] {
+            let n = getxattr(src + "/copy", name, nil, 0, 0, XATTR_NOFOLLOW)
+            var b = [UInt8](repeating: 0, count: max(n, 0))
+            _ = getxattr(src + "/copy", name, &b, b.count, 0, XATTR_NOFOLLOW)
+            return b
+        }
+        XCTAssertEqual(read(XATTR_RESOURCEFORK_NAME), fork)
+        // A fork of exactly two 64 KB pieces: nothing to fetch after the second.
+        write("even", "")
+        write("even-copy", "")
+        let even = [UInt8](repeating: 9, count: 128 << 10)
+        XCTAssertEqual(setxattr(src + "/even", XATTR_RESOURCEFORK_NAME, even, even.count, 0, XATTR_NOFOLLOW), 0)
+        XCTAssertEqual(Engine.copyAttributesInPieces(from: src + "/even", to: src + "/even-copy"), [])
+        XCTAssertEqual(getxattr(src + "/even-copy", XATTR_RESOURCEFORK_NAME, nil, 0, 0, XATTR_NOFOLLOW), even.count)
+        XCTAssertEqual(read("com.apple.FinderInfo"), info)
+    }
+
+    func testAPersonsOwnPastAndArchiveFoldersAreBackedUp() throws {
+        write("_Past/old-plan.md", "p")
+        write("_Archive/notes.md", "a")
+        write("now.md", "n")
+        let r = try backup()
+        XCTAssertEqual(r.problems, [])
+        XCTAssertEqual(try String(contentsOfFile: dst + "/_Past/old-plan.md", encoding: .utf8), "p")
+        XCTAssertEqual(try String(contentsOfFile: dst + "/_Archive/notes.md", encoding: .utf8), "a")
+        XCTAssertEqual(try backup().copied, 0, "the copies are compared, not copied again")
     }
 
     func testABackupCanBeBackedUpAgain() throws {
@@ -602,7 +652,131 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(Lanes.choose(source: .spinning, destination: .ssd), Lanes(small: 1, big: 1, together: false, diskOrder: true))
         XCTAssertEqual(Lanes.choose(source: .unknown, destination: .ssd).diskOrder, true, "unknown is treated as spinning")
         XCTAssertEqual(Lanes.choose(source: .ssd, destination: .spinning), Lanes(small: 1, big: 1, together: false, diskOrder: false))
-        XCTAssertEqual(Lanes.choose(source: .network, destination: .spinning).small, 16, "network rules over a disk behind it")
-        XCTAssertEqual(Lanes.choose(source: .ssd, destination: .network).small, 16)
+        XCTAssertEqual(Lanes.choose(source: .network, destination: .spinning).small, 64, "network rules over a disk behind it")
+        XCTAssertEqual(Lanes.choose(source: .ssd, destination: .network).small, 64)
+    }
+
+    func testFolderDatesArriveForEveryFolder() throws {
+        for a in 0..<6 { for b in 0..<6 { write("d\(a)/e\(b)/f.txt", "x") } }
+        for a in 0..<6 {
+            for b in 0..<6 { setMtime(src + "/d\(a)/e\(b)", 1_000_000_000 + Double(a * 10 + b)) }
+            setMtime(src + "/d\(a)", 900_000_000 + Double(a))
+        }
+        var o = Options(); o.lanes = Lanes(small: 8, big: 1, together: true, diskOrder: false)
+        _ = try backup(o)
+        for a in 0..<6 {
+            XCTAssertEqual(lst(dst + "/d\(a)").st_mtimespec.tv_sec, lst(src + "/d\(a)").st_mtimespec.tv_sec, "d\(a)")
+            for b in 0..<6 {
+                XCTAssertEqual(lst(dst + "/d\(a)/e\(b)").st_mtimespec.tv_sec, lst(src + "/d\(a)/e\(b)").st_mtimespec.tv_sec, "d\(a)/e\(b)")
+            }
+        }
+    }
+
+    func testSurveyNamesWhatIsLeftAndTheRunNamesWhatItCouldNotRead() throws {
+        write("ok.txt", "a"); write("locked.txt", "b")
+        chmod(src + "/locked.txt", 0)
+        defer { chmod(src + "/locked.txt", 0o644) }
+        let r = try backup()
+        XCTAssertEqual(r.failed, ["locked.txt"])
+        write("ok.txt", "changed", mtime: 2_000_000_000)
+        let v = try Survey.of(source: src, destination: dst)
+        XCTAssertEqual(Set(v.pending.keys), ["ok.txt", "locked.txt"])
+        XCTAssertEqual(v.pending["ok.txt"] ?? 0, 2_000_000_000, accuracy: 0.001)
+    }
+
+    func testTheTrimmedWriterKeepsAReadOnlyFileReadOnly() throws {
+        write("objects/ab/cdef", "git object", mtime: 1_400_000_000)
+        chmod(src + "/objects/ab/cdef", 0o444)
+        var o = Options(); o.trimmedWrites = true; o.allowClone = false
+        let r = try backup(o)
+        XCTAssertEqual(r.problems, [])
+        XCTAssertEqual(lst(dst + "/objects/ab/cdef").st_mode & 0o777, 0o444)
+        assertSame("objects/ab/cdef")
+        chmod(dst + "/objects/ab/cdef", 0o644)   // so the fixture can be cleaned
+        chmod(src + "/objects/ab/cdef", 0o644)
+    }
+
+    /// The trimmed writer on a drive that keeps no attributes, flags or creation date (exFAT
+    /// stands in for a NAS behind SMB): every file still arrives, with its data and dates.
+    func testTheTrimmedWriterOnADriveWithoutAttributes() throws {
+        let mnt = ProcessInfo.processInfo.environment["ARCHIVIST_EXFAT"] ?? ""
+        try XCTSkipIf(mnt.isEmpty || !FileManager.default.fileExists(atPath: mnt), "set ARCHIVIST_EXFAT to a mounted exFAT volume")
+        let out = mnt + "/trimmed-\(getpid())"
+        defer { try? FileManager.default.removeItem(atPath: out) }
+        write("tagged.txt", "with an attribute", mtime: 1_400_000_000)
+        XCTAssertEqual(setxattr(src + "/tagged.txt", "com.apple.metadata:kMDItemWhereFroms", "x", 1, 0, 0), 0)
+        write("hidden.txt", "hidden flag", mtime: 1_400_000_001)
+        XCTAssertEqual(chflags(src + "/hidden.txt", UInt32(UF_HIDDEN)), 0)
+        var o = Options(); o.trimmedWrites = true; o.allowClone = false
+        let r = try Engine(source: src, destination: out, options: o).run()
+        XCTAssertEqual(r.problems, [])
+        XCTAssertEqual(r.copied, 2)
+        XCTAssertEqual(try String(contentsOfFile: out + "/tagged.txt", encoding: .utf8), "with an attribute")
+        XCTAssertEqual(lst(out + "/hidden.txt").st_mtimespec.tv_sec, 1_400_000_001)
+    }
+
+    func testAnOldArchiveAtTheDestinationIsKeptEvenWhenTheSourceHasAFolderOfThatName() throws {
+        write("_Past/mine.txt", "a person's own folder")
+        write("a.txt", "a")
+        let old = dst + "/_Past/2026-01-01 120000/gone.txt"
+        try FileManager.default.createDirectory(atPath: (old as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        try "old version".write(toFile: old, atomically: true, encoding: .utf8)
+        for pass in 1...2 {
+            let r = try backup()
+            XCTAssertEqual(r.retired, 0, "pass \(pass)")
+            XCTAssertEqual(r.copied, pass == 1 ? 2 : 0, "pass \(pass)")
+            XCTAssertEqual(try String(contentsOfFile: old, encoding: .utf8), "old version", "pass \(pass)")
+            XCTAssertEqual(try String(contentsOfFile: dst + "/_Past/mine.txt", encoding: .utf8), "a person's own folder")
+        }
+        XCTAssertEqual(try Survey.of(source: src, destination: dst).toCopy, 0)
+        XCTAssertEqual(Past.versionNames(in: dst + "/_Past"), ["2026-01-01 120000"])
+    }
+
+    func testWhetherAFailureWasTheSourcesOrTheDestinations() throws {
+        write("fine.txt", "x")
+        write("shut.txt", "y")
+        chmod(src + "/shut.txt", 0)
+        defer { chmod(src + "/shut.txt", 0o644) }
+        XCTAssertFalse(Engine.cannotRead(src + "/fine.txt", kind: .file))
+        XCTAssertTrue(Engine.cannotRead(src + "/shut.txt", kind: .file))
+        XCTAssertTrue(Engine.cannotRead(src + "/missing.txt", kind: .file))
+        symlink("fine.txt", src + "/link")
+        XCTAssertFalse(Engine.cannotRead(src + "/link", kind: .symlink))
+    }
+
+    func testTheSurveyCountsWhatTheRunCopies() throws {
+        try FileManager.default.createDirectory(atPath: src + "/" + Names.state, withIntermediateDirectories: true)
+        write("_Past/old.txt", "an earlier version, kept by the run that made this source")
+        write(Names.past + "/x.txt", "the same, newer name")
+        write("a.txt", "a")
+        let r = try backup()
+        XCTAssertEqual(r.copied, 1)
+        let v = try Survey.of(source: src, destination: dst)
+        XCTAssertEqual(v.files, 1)
+        XCTAssertEqual(v.toCopy, 0)
+    }
+
+    func testAnACLLookupThatCannotAnswerSaysYes() throws {
+        XCTAssertFalse(TreeScanner.hasACL(src + "/nothing-here"))
+        write("closed/inner.txt", "x")
+        chmod(src + "/closed", 0)
+        defer { chmod(src + "/closed", 0o755) }
+        XCTAssertTrue(TreeScanner.hasACL(src + "/closed/inner.txt"))
+    }
+
+    func testASourceThatGoesAwayMidRunEndsTheRunWithOneMessage() throws {
+        for i in 0..<40 { write("f\(i).txt", "x") }
+        var o = Options(); o.lanes = Lanes(small: 4, big: 1, together: true, diskOrder: false); o.allowClone = false
+        let engine = Engine(source: src, destination: dst, options: o)
+        let here = src, away = src + "-away"
+        engine.onProgress = { p in   // fires once the scan is done and copying begins: the drive "unplugs" there
+            if p.stage == .copying, access(away, F_OK) != 0 { rename(here, away) }
+        }
+        defer { rename(away, src) }
+        let r = try engine.run()
+        XCTAssertTrue(r.stopped)
+        XCTAssertTrue(r.sourceGone)
+        XCTAssertEqual(r.problems.count, 1, "\(r.problems.prefix(3))")
+        XCTAssertTrue(r.problems[0].contains("source was disconnected"))
     }
 }

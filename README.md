@@ -27,6 +27,18 @@ House of Helios doesn't pay Apple for a developer account, so macOS doesn't know
 
 Backing up a whole drive or your home folder needs **Full Disk Access**: System Settings → Privacy & Security → Full Disk Access → turn on Archivist.
 
+## Folders on another Mac
+
+Archivist can back up from, or to, a folder shared by another Mac. Connect to it in Finder first (**Go → Connect to Server**), then drop it in like any other folder.
+
+**On the Mac that shares the folder:**
+1. **System Settings → General → Sharing → File Sharing:** on, with the folder in the list.
+2. **System Settings → Network → Firewall:** if it is on, open **Options…**, turn off **Block all incoming connections** and **Enable stealth mode**, and set **File Sharing** to **Allow incoming connections**.
+
+**On the Mac running Archivist:** the first time it reads a shared folder, macOS asks whether Archivist may use files on a network volume. Click **Allow**. If the question was missed, the window says **Waiting for your OK**; the answer lives in **System Settings → Privacy & Security → Files & Folders → Archivist → Network Volumes**.
+
+Pulling (Archivist runs on the Mac that keeps the backup and reads the other Mac's folder) is much faster than pushing for folders with many small files: in our test, 19 s against about 2½ minutes for 5,200 files over Wi-Fi. Big files go at the network's speed either way.
+
 ## Updates
 
 Archivist checks this repository's releases. When a newer version is out, a green **Update** button appears at the top; it downloads, checks the release's signature and fingerprint, and restarts into the new version.

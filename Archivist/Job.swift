@@ -1,6 +1,7 @@
 import ArchivistCore
 import Foundation
 import Observation
+import os
 
 /// One source: a folder or a whole drive, with its own rules.
 struct Source: Codable, Identifiable, Hashable {
@@ -46,11 +47,21 @@ struct Source: Codable, Identifiable, Hashable {
 
     /// The folder or drive carries its own Finder icon (a hidden `Icon\r` file, or a drive's
     /// `.VolumeIcon.icns`): show that, not one of ours.
-    var hasCustomIcon: Bool {
-        FileManager.default.fileExists(atPath: path + (isDrive ? "/.VolumeIcon.icns" : "/Icon\r"))
-    }
+    var hasCustomIcon: Bool { facts.icon }
+    var isDrive: Bool { facts.drive }
 
-    var isDrive: Bool { (try? URL(fileURLWithPath: path).resourceValues(forKeys: [.isVolumeKey]).isVolume) == true }
+    /// Looked up once per path: the window asks on every redraw, and on a network drive each
+    /// look is a trip to the server, on the main thread (it froze the window while counting).
+    private static let known = OSAllocatedUnfairLock(initialState: [String: (drive: Bool, icon: Bool)]())
+    private var facts: (drive: Bool, icon: Bool) {
+        if let f = Source.known.withLock({ $0[path] }) { return f }
+        let drive = (try? URL(fileURLWithPath: path).resourceValues(forKeys: [.isVolumeKey]).isVolume) == true
+        let f = (drive: drive, icon: FileManager.default.fileExists(atPath: path + (drive ? "/.VolumeIcon.icns" : "/Icon\r")))
+        // Not remembered while the path is away (a share or disk not mounted yet): what it is
+        // can only be seen once it is there.
+        if FileManager.default.fileExists(atPath: path) { Source.known.withLock { $0[path] = f } }
+        return f
+    }
     var name: String { isDrive ? Volumes.name(of: path) : (path as NSString).lastPathComponent }
     /// The Mac's own drive is sealed at `/`; its files live on the Data volume.
     var readPath: String { Volumes.copyablePath(path) }
@@ -66,6 +77,8 @@ struct Job: Codable, Identifiable, Hashable {
     var lastState: String?           // a few words: where this backup stands
     var lastPast: String?
     var lastBytes: Int64?                            // size of the last backup's source, for "Last backup: date, size"
+    var lastStart: Date?                             // when the last finished backup started: files changed after it are live, not missed
+    var lastSkipped: [String: [String]] = [:]        // source id → files the last backup could not read (bounded at 200 each)
     var icon: String = Job.icons.randomElement()!   // a picture per backup, so a glance tells them apart
     var color: String = Nippon.colors.randomElement()!.hex
     var lookChosen = false                           // picked by hand in Settings: then it never follows the destination
@@ -108,7 +121,7 @@ struct Job: Codable, Identifiable, Hashable {
     mutating func takeResults(from other: Job) {
         if (other.lastRun ?? .distantPast) > (lastRun ?? .distantPast) {
             lastRun = other.lastRun; lastResult = other.lastResult; lastState = other.lastState; lastPast = other.lastPast
-            lastBytes = other.lastBytes
+            lastBytes = other.lastBytes; lastStart = other.lastStart; lastSkipped = other.lastSkipped
         }
         destinationSince = other.destinationSince
     }
@@ -140,6 +153,8 @@ struct Job: Codable, Identifiable, Hashable {
         lastState = try c.decodeIfPresent(String.self, forKey: .lastState)
         lastPast = try c.decodeIfPresent(String.self, forKey: .lastPast)
         lastBytes = try c.decodeIfPresent(Int64.self, forKey: .lastBytes)
+        lastStart = try c.decodeIfPresent(Date.self, forKey: .lastStart)
+        lastSkipped = try c.decodeIfPresent([String: [String]].self, forKey: .lastSkipped) ?? [:]
         schedule = (try? c.decodeIfPresent(Schedule.self, forKey: .schedule)) ?? .byHand   // older shapes fall back
         destinationKind = try c.decodeIfPresent(DriveKind.self, forKey: .destinationKind)
         keepDeleted = try c.decodeIfPresent(Bool.self, forKey: .keepDeleted) ?? true
@@ -201,6 +216,7 @@ final class JobStore {
             guard let self, let i = self.jobs.firstIndex(where: { $0.id == id }) else { return }
             var j = self.jobs[i]
             j.lastResult = summary; j.lastState = state; j.lastPast = past ?? j.lastPast; j.lastRun = Date(); j.lastBytes = total
+            if let done = self.runner(for: id).finished { j.lastStart = done.start; j.lastSkipped = done.skipped }   // only a backup that ran to its end
             self.update(j)
         }
     }
@@ -369,6 +385,7 @@ final class Runner {
     func start(_ job: Job, planned: (files: Int, bytes: Int64) = (0, 0), done: @escaping (_ summary: String, _ state: String, _ past: String?, _ total: Int64) -> Void) {
         guard !running else { return }
         running = true
+        finished = nil
         let awake = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled, .userInitiated], reason: "Backup")
         stopping = false
         stopRequested = false
@@ -418,7 +435,8 @@ final class Runner {
             var bytes: Int64 = 0, total: Int64 = 0
             var past: String?
             var problems: [String] = []
-            var stopped = false, failed = false
+            var skipped: [String: [String]] = [:]
+            var stopped = false, failed = false, sourceGone = false
             // The destination drive gone (unplugged, asleep): stop, and say that once, not per file.
             func unplugged() -> Bool { job.destination.map { !FileManager.default.fileExists(atPath: $0) } ?? false }
             for (i, (source, dst)) in runs.enumerated() where !stopped && !self.stopRequested && !unplugged() {
@@ -465,6 +483,8 @@ final class Runner {
                     total += r.sourceBytes   // counted by the run itself (a second scan per source cost ~0.5 s)
                     past = job.pastRoot ?? past
                     problems += r.problems
+                    if r.sourceGone { sourceGone = true; DevLog.write("source disconnected: \(source.name)") }
+                    if !r.failed.isEmpty { skipped[source.id.uuidString] = Array(r.failed.prefix(200)) }
                     stopped = r.stopped
                 } catch {
                     failed = true
@@ -480,12 +500,13 @@ final class Runner {
             let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
             var parts: [String] = []
             if gone { parts.append("Destination disconnected") }
-            if stopped || self.stopRequested { parts.append("Stopped") }
+            else if sourceGone { parts.append("Source disconnected") }
+            else if stopped || self.stopRequested { parts.append("Stopped") }
             if copied > 0 || retired > 0 { parts.append("\(copied) copied (\(size)), \(unchanged) already there") }
             else if problems.isEmpty { parts.append("Nothing had changed") }
             else { parts.append("Nothing copied") }
             if retired > 0 { parts.append("\(retired) earlier versions kept") }
-            if !problems.isEmpty && !gone { parts.append("\(problems.count) not copied") }
+            if !problems.isEmpty && !gone && !sourceGone { parts.append("\(problems.count) not copied") }
             let summary = parts.joined(separator: ", ")
             DevLog.write(String(format: "backup end: %@ — %@ in %.1f s", job.title, summary, Date().timeIntervalSince(backupStart)))
             if let root = job.pastRoot, !stopped, !self.stopRequested, !gone {
@@ -504,10 +525,12 @@ final class Runner {
                 }
                 ProcessInfo.processInfo.endActivity(awake)
                 self.problems = problems
+                self.finished = stopped || self.stopRequested || gone || failed ? nil : (self.started, skipped)
                 self.running = false
                 self.stopping = false
                 self.engine = nil
                 let state = gone ? "Destination disconnected"
+                    : sourceGone ? "Source disconnected"
                     : stopped || self.stopRequested ? "Stopped partway"
                     : problems.isEmpty ? "Backed up"
                     : problems.count == 1 ? "Backed up, 1 file skipped" : "Backed up, \(problems.count) files skipped"
@@ -551,6 +574,8 @@ final class Runner {
     /// estimate is eased in, never jumped to.
     private var etaAnchor: (date: Date, seconds: TimeInterval)?
     private var started = Date()
+    /// The last backup that ran to its end: when it started and what it could not read, for the source rows.
+    var finished: (start: Date, skipped: [String: [String]])?
 
     func debugAnchor(_ seconds: TimeInterval) { etaAnchor = (Date(), seconds); started = Date().addingTimeInterval(-160) } // snapshots
 

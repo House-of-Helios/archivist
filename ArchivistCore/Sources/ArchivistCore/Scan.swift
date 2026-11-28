@@ -31,6 +31,8 @@ public struct TreeScanner {
     public private(set) var unreadable: [String] = []
     /// Asked between folders: true ends the scan early (Stop must not wait out a million-file walk).
     public var shouldStop: (() -> Bool)?
+    /// Files found so far, after each level of the tree: a long walk shows it is moving.
+    public var onCount: ((Int) -> Void)?
 
     public init(excluded: Set<String> = [], skipRootNames: Set<String> = []) {
         self.excluded = excluded
@@ -41,18 +43,25 @@ public struct TreeScanner {
     /// 16 in flight read 11x faster over SMB, THESIS §6), 1 on a local one (a spinning disk
     /// must not seek between folders).
     public var width: Int?
+    /// Whether each entry's ACL was read by the scan. Not on a network drive: there it cost an
+    /// extra trip per entry (132 vs 643 entries/s over SMB/WiFi, 1 folder at a time); callers
+    /// look it up per file with `hasACL(_:)`, only for the files they copy.
+    public private(set) var askedACL = true
 
     /// Every entry under `root`, parents before children, sorted by path within a folder.
     /// Unreadable folders are reported in `problems`, never silently skipped.
     public mutating func scan(_ root: String) throws -> (entries: [Entry], problems: [String]) {
         var rootStat = stat()
         guard lstat(root, &rootStat) == 0 else { throw ArchivistError.io("lstat", root, errno) }
-        let width = self.width ?? (TreeScanner.isNetwork(root) ? 16 : 1)
+        let network = TreeScanner.isNetwork(root)
+        let width = self.width ?? (network ? 16 : 1)
+        askedACL = !network
         let me = self, rootDev = rootStat.st_dev
         var problems: [String] = []
         // Level by level, each level's folders listed `width` at a time ...
         var listings: [String: Listing] = [:]
         var level = [""]
+        var found = 0
         while !level.isEmpty {
             if shouldStop?() == true { break }
             let results = TreeScanner.map(level, width: width) { me.listOne($0, root: root, rootDev: rootDev) }
@@ -66,8 +75,10 @@ public struct TreeScanner {
                 }
                 otherVolumes += l.otherVolumes
                 next += l.dirs
+                found += l.entries.reduce(0) { $0 + ($1.kind == .file ? 1 : 0) }
                 listings[rel] = l
             }
+            onCount?(found)
             level = next
         }
         // ... then laid out depth first, the order callers have always had.
@@ -88,7 +99,7 @@ public struct TreeScanner {
         let abs = rel.isEmpty ? root : root + "/" + rel
         var l = Listing()
         let children: [Entry]
-        do { children = try TreeScanner.list(abs, relative: rel) } catch { l.error = error; return l }
+        do { children = try TreeScanner.list(abs, relative: rel, acl: askedACL) } catch { l.error = error; return l }
         for e in children.sorted(by: { $0.path < $1.path }) {
             let name = (e.path as NSString).lastPathComponent
             if rel.isEmpty && skipRootNames.contains(name) { continue }
@@ -113,29 +124,55 @@ public struct TreeScanner {
     }
 
     /// `f` over `items`, `width` at a time, results in order.
-    static func map<T>(_ items: [String], width: Int, _ f: (String) -> T) -> [T] {
+    static func map<T>(_ items: [String], width: Int, _ f: @escaping (String) -> T) -> [T] {
         guard width > 1, items.count > 1 else { return items.map(f) }
         var out = [T?](repeating: nil, count: items.count)
         let lock = NSLock()
         var next = 0
-        let qos = DispatchQoS.QoSClass(rawValue: qos_class_self()) ?? .default
-        withoutActuallyEscaping(f) { f in
-            out.withUnsafeMutableBufferPointer { b in
-                let buf = b   // each slot written by exactly one worker
-                let group = DispatchGroup()
-                for _ in 0..<min(width, items.count) {
-                    DispatchQueue.global(qos: qos).async(group: group) {
-                        while true {
-                            lock.lock(); let i = next; next += 1; lock.unlock()
-                            guard i < items.count else { return }
-                            buf[i] = f(items[i])
-                        }
-                    }
+        out.withUnsafeMutableBufferPointer { b in
+            let buf = b   // each slot written by exactly one worker, all done before this returns
+            onThreads(min(width, items.count)) {
+                while true {
+                    lock.lock(); let i = next; next += 1; lock.unlock()
+                    guard i < items.count else { return }
+                    buf[i] = f(items[i])
                 }
-                group.wait()
             }
         }
         return out.map { $0! }
+    }
+
+    /// `body` on `count` threads of their own, at the caller's QoS; returns when all are done.
+    /// Not GCD's pool: it holds back at about the core count, and these threads mostly wait.
+    public static func onThreads(_ count: Int, _ body: @escaping () -> Void) {
+        let group = DispatchGroup()
+        let qos = qos_class_self()
+        for _ in 0..<count {
+            group.enter()
+            let t = Thread {
+                pthread_set_qos_class_self_np(qos, 0)
+                body()
+                group.leave()
+            }
+            t.start()
+        }
+        group.wait()
+    }
+
+    /// Does this one item (not followed if a link) carry an ACL?
+    public static func hasACL(_ path: String) -> Bool {
+        var al = attrlist()
+        al.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
+        al.commonattr = attrgroup_t(ATTR_CMN_RETURNED_ATTRS) | attrgroup_t(ATTR_CMN_EXTENDED_SECURITY)
+        var buf = [UInt8](repeating: 0, count: 4096)
+        return buf.withUnsafeMutableBytes { b -> Bool in
+            // Unanswered (a network error, an ACL too big for the buffer): taken as "has one", so the
+            // copy re-applies the ACL from the source rather than leaving the file open to all.
+            guard getattrlist(path, &al, b.baseAddress!, b.count, UInt32(FSOPT_NOFOLLOW)) == 0 else { return errno != ENOENT }
+            let returned = b.loadUnaligned(fromByteOffset: 4, as: attribute_set_t.self)
+            guard returned.commonattr & attrgroup_t(ATTR_CMN_EXTENDED_SECURITY) != 0 else { return false }
+            return b.loadUnaligned(fromByteOffset: 4 + MemoryLayout<attribute_set_t>.size, as: attrreference_t.self).attr_length > 0
+        }
     }
 
     /// A drive reached over a network (SMB, NFS, AFP, WebDAV): not marked local by the kernel.
@@ -145,7 +182,7 @@ public struct TreeScanner {
     }
 
     /// One folder's entries via getattrlistbulk.
-    static func list(_ dir: String, relative rel: String) throws -> [Entry] {
+    static func list(_ dir: String, relative rel: String, acl: Bool = true) throws -> [Entry] {
         let fd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
         guard fd >= 0 else { throw ArchivistError.io("open", dir, errno) }
         defer { close(fd) }
@@ -153,7 +190,7 @@ public struct TreeScanner {
         var al = attrlist()
         al.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
         al.commonattr = attrgroup_t(ATTR_CMN_RETURNED_ATTRS) | attrgroup_t(ATTR_CMN_NAME)
-            | attrgroup_t(ATTR_CMN_OBJTYPE) | attrgroup_t(ATTR_CMN_MODTIME) | attrgroup_t(ATTR_CMN_EXTENDED_SECURITY)
+            | attrgroup_t(ATTR_CMN_OBJTYPE) | attrgroup_t(ATTR_CMN_MODTIME) | (acl ? attrgroup_t(ATTR_CMN_EXTENDED_SECURITY) : 0)
             | attrgroup_t(ATTR_CMN_FILEID)
         al.fileattr = attrgroup_t(ATTR_FILE_LINKCOUNT) | attrgroup_t(ATTR_FILE_DATALENGTH)
 
