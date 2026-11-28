@@ -729,6 +729,18 @@ enum DriveMemories {
         return (try? Data(contentsOf: file)).flatMap { try? dec.decode([String: DriveMemory].self, from: $0) } ?? [:]
     }
 
+    /// Forget a drive's past runs and its best pace: estimates start fresh from the next run
+    /// (runs timed by a slower Archivist kept pricing a faster one at the old speed).
+    static func forget(_ path: String) {
+        var all = load()
+        all[key(for: path)] = nil
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601; enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let d = try? enc.encode(all) { try? d.write(to: file, options: .atomic) }
+        let c = (path as NSString).pathComponents
+        let pace = "pace:" + (c.count > 2 && c[1] == "Volumes" ? c[2] : "/")
+        UserDefaults.standard.removeObject(forKey: pace + ".f"); UserDefaults.standard.removeObject(forKey: pace + ".b")
+    }
+
     static func save(_ m: DriveMemory, for key: String) {
         var all = load()
         all[key] = m

@@ -1051,6 +1051,10 @@ struct SettingsSheet: View {
 
                 Permissions()
 
+                if let dest = job.destination {
+                    DriveMemoryReset(path: dest, running: view.runner.running)
+                }
+
                 Divider()
                 HStack {
                     Button("Delete this backup…", role: .destructive) { confirmDelete = true }
@@ -1360,6 +1364,35 @@ struct Permissions: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             fullDisk = Permissions.hasFullDiskAccess()   // back from System Settings: the answer may have changed
+        }
+    }
+}
+
+/// Forget what the destination drive has done so far: time estimates and the speed meter start
+/// fresh from the next backup.
+struct DriveMemoryReset: View {
+    let path: String
+    let running: Bool
+    @State private var runs = 0
+    @State private var confirm = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Time estimates").font(Typeface.text(13, .semibold)).foregroundStyle(Palette.ink)
+                Text(runs == 0 ? "Learned from this drive's backups. None yet."
+                     : "Learned from this drive's last \(runs) \(runs == 1 ? "backup" : "backups").")
+                    .font(Typeface.text(11.5)).foregroundStyle(Palette.soft)
+            }
+            Spacer()
+            Button("Start fresh") { confirm = true }.buttonStyle(QuietButton()).disabled(running || runs == 0)
+        }
+        .onAppear { runs = DriveMemories.load()[DriveMemories.key(for: path)]?.runs.count ?? 0 }
+        .alert("Forget this drive's past backups?", isPresented: $confirm) {
+            Button("Start fresh", role: .destructive) { DriveMemories.forget(path); runs = 0 }
+            Button("Keep", role: .cancel) {}
+        } message: {
+            Text("Time estimates are learned again from the next backup. Nothing on the drive changes.")
         }
     }
 }

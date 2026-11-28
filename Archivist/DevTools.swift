@@ -95,6 +95,10 @@ enum DevControl {
 
     private static func run(_ cmd: [String: Any]) -> [String: Any] {
         switch cmd["cmd"] as? String {
+        case "forgetDrive":   // {"cmd":"forgetDrive","path":"/Volumes/X"}: Settings' "Start fresh"
+            guard let p = cmd["path"] as? String else { return ["ok": false, "error": "no path"] }
+            DriveMemories.forget(p)
+            return ["ok": true, "left": DriveMemories.load()[DriveMemories.key(for: p)] == nil]
         case "state":
             writeState()
             return ["ok": true, "file": DevLog.file.deletingLastPathComponent().appendingPathComponent("state.json").path]
