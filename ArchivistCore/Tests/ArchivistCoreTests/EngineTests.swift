@@ -779,4 +779,17 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(r.problems.count, 1, "\(r.problems.prefix(3))")
         XCTAssertTrue(r.problems[0].contains("source was disconnected"))
     }
+
+    func testAScanStopsWithinALevelAndCountsAsItGoes() throws {
+        for d in 0..<300 { write("level/d\(d)/f.txt", "x") }   // one level of 300 folders
+        var scanner = TreeScanner()
+        scanner.width = 4
+        let asked = NSLock(); var calls = 0
+        scanner.shouldStop = { asked.lock(); defer { asked.unlock() }; calls += 1; return calls > 40 }
+        var counts: [Int] = []
+        let seen = NSLock()
+        scanner.onCount = { n in seen.lock(); counts.append(n); seen.unlock() }
+        let (entries, _) = try scanner.scan(src)
+        XCTAssertLessThan(entries.filter { $0.kind == .file }.count, 300, "stopped partway through the level")
+    }
 }

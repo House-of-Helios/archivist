@@ -197,6 +197,12 @@ final class JobStore {
     /// Each path's drive and each destination's room, kept across tab switches.
     var drives: [String: Drive] = [:]
     var spaces: [String: (free: Int64, total: Int64)] = [:]
+    /// Each backup's walk under way (one at a time per backup), its running counts, and the setup
+    /// its last finished walk saw: they outlive a tab switch.
+    var walks: [Job.ID: (key: String, token: UUID, task: Task<Void, Never>)] = [:]
+    var walkedKey: [Job.ID: String] = [:]
+    var measuringJobs: Set<Job.ID> = []
+    var counted: [Source.ID: Int] = [:]
 
     /// Starts a backup: the button and the dev remote both come here.
     func start(_ id: Job.ID, planned: (files: Int, bytes: Int64) = (0, 0)) {

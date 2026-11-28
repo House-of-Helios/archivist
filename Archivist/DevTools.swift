@@ -174,12 +174,14 @@ enum DevControl {
                                     "sources": j.sources.map(\.path), "lastResult": j.lastResult ?? "", "schedule": j.schedule.words]
             // Each source row as the window reads it: size, what is still to copy, and whether what is
             // left is only live or unreadable files (shown "up to date" with an info dot).
+            d["walking"] = store.walks[j.id] != nil
             d["rows"] = j.sources.map { s -> [String: Any] in
                 var row: [String: Any] = ["name": s.name, "skip": s.skip]
                 if let v = store.surveys[s.id] {
                     row["bytes"] = v.bytes; row["files"] = v.files; row["toCopy"] = v.toCopy; row["bytesToCopy"] = v.bytesToCopy
                     row["compared"] = v.compared; row["pending"] = v.pending.count
                 }
+                if let n = store.counted[s.id] { row["counting"] = n }
                 if let q = SourceRow.settled(job: j, source: s, survey: store.surveys[s.id]) { row["settled"] = ["live": q.live, "unreadable": q.unreadable.count] }
                 return row
             }

@@ -36,6 +36,7 @@ struct ArchivistApp: App {
 struct RootView: View {
     @Environment(JobStore.self) private var store
     @State private var selection: Job.ID?
+    @AppStorage("lastTab") private var lastTab = ""   // the tab open at quit opens again
 
     var body: some View {
         VStack(spacing: 0) {
@@ -48,6 +49,7 @@ struct RootView: View {
             }
         }
         .background(Palette.ground.ignoresSafeArea())   // paper to every edge: no strip at the smallest size
+        .onChange(of: selection) { _, id in if let id { lastTab = id.uuidString } }
         .onChange(of: store.jobs.map(\.id)) { _, ids in
             if let id = selection, ids.contains(id) { return }
             selection = ids.first ?? store.add().id   // never a blank window: the first tab left, or a new one
@@ -62,7 +64,7 @@ struct RootView: View {
         }
         .onAppear {
             if store.jobs.isEmpty { store.add() }
-            selection = selection ?? store.jobs.first?.id
+            selection = selection ?? store.jobs.first { $0.id.uuidString == lastTab }?.id ?? store.jobs.first?.id
             DevLog.write("app open: \(store.jobs.count) backups")
             for w in NSApp.windows where w.contentView != nil {
                 w.backgroundColor = NSColor(Palette.ground)   // the window's own fill, under everything

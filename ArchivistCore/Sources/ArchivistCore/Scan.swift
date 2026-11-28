@@ -62,9 +62,27 @@ public struct TreeScanner {
         var listings: [String: Listing] = [:]
         var level = [""]
         var found = 0
+        // Stop and the running count are checked per folder, not per level: one level of a big
+        // tree over WiFi held thousands of folders and took minutes, so the window showed no
+        // number and Stop seemed hung until the level ended (the Mini, 2026-11-28).
+        let tally = NSLock()
+        var running = 0, lastShown = Date.distantPast
+        let stop = shouldStop, count = onCount
         while !level.isEmpty {
-            if shouldStop?() == true { break }
-            let results = TreeScanner.map(level, width: width) { me.listOne($0, root: root, rootDev: rootDev) }
+            if stop?() == true { break }
+            let results = TreeScanner.map(level, width: width) { rel -> Listing in
+                if stop?() == true { return Listing(stopped: true) }
+                let l = me.listOne(rel, root: root, rootDev: rootDev)
+                let files = l.entries.reduce(0) { $0 + ($1.kind == .file ? 1 : 0) }
+                tally.lock()
+                running += files
+                let show = Date().timeIntervalSince(lastShown) > 0.5 ? running : nil
+                if show != nil { lastShown = Date() }
+                tally.unlock()
+                if let show { count?(show) }
+                return l
+            }
+            if stop?() == true || results.contains(where: \.stopped) { break }   // a half level is no tree
             var next: [String] = []
             for (rel, l) in zip(level, results) {
                 if let error = l.error {
@@ -92,7 +110,7 @@ public struct TreeScanner {
         return (out, problems)
     }
 
-    struct Listing { var entries: [Entry] = []; var dirs: [String] = []; var otherVolumes: [String] = []; var error: Error? }
+    struct Listing { var entries: [Entry] = []; var dirs: [String] = []; var otherVolumes: [String] = []; var error: Error?; var stopped = false }
 
     /// One folder's kept entries and subfolders, after the leaving-out rules.
     func listOne(_ rel: String, root: String, rootDev: dev_t) -> Listing {

@@ -14,9 +14,10 @@ struct JobView: View {
     var runnerOverride: Runner? = nil                  // snapshots
     var runner: Runner { runnerOverride ?? store.runner(for: jobID) }
     @State var interrupted = false
-    @State var measuring = false                       // sources being walked
-    @State var counted: [Source.ID: Int] = [:]         // files found so far by the walk under way
-    @State var refreshTask: Task<Void, Never>?         // the one walk under way; a new one cancels it
+    // The walk and its running count live in the store, not the tab: a walk keeps going while
+    // another tab is open, and coming back shows its count where it got to (Helios, 2026-11-28).
+    var measuring: Bool { store.measuringJobs.contains(job.id) }
+    var counted: [Source.ID: Int] { store.counted }
     @State var destinationState: DestinationState = .present
     enum DestinationState { case present, folderMissing, driveMissing }
     @State var drives: [String: Drive] = [:]          // path → drive, looked up off the main thread
@@ -99,8 +100,7 @@ struct JobView: View {
         .animation(.easeOut(duration: 0.15), value: showingProblems)
         .onReceive(NotificationCenter.default.publisher(for: .showSettings)) { _ in showingSettings = true }
         .onExitCommand { showingSettings = false }
-        .onChange(of: refreshKey, initial: true) { kick() }
-        .onDisappear { refreshTask?.cancel() }
+        .onChange(of: refreshKey, initial: true) { kick(resume: true) }
         .task(id: job.destination) {
             // The destination's presence is checked every 3 s on its own: one look, no walk, so a
             // renamed folder or an unplugged drive shows within seconds (not at the next measuring).
@@ -166,7 +166,7 @@ struct JobView: View {
     @MainActor static var lastCheck = Date.distantPast
 
     func refresh() async {
-        measuring = false   // a cancelled walk left it set
+        store.measuringJobs.remove(job.id)   // a cancelled walk left it set
         guard !preset else { return }
         let j = job
         // What the store already knows shows at once: a tab switch never blanks the destination
@@ -206,9 +206,9 @@ struct JobView: View {
         // One walk per source: its size shows as soon as the source is walked, then the
         // comparison with the destination. An edit or Start cancels the walk (kick), so walks
         // never stack, and a backup started now walks the tree once, itself.
-        measuring = true
-        defer { if !Task.isCancelled { measuring = false } }
-        let store = store
+        let store = store, id = job.id
+        store.measuringJobs.insert(id)
+        defer { if !Task.isCancelled { store.measuringJobs.remove(id) } }
         for s in j.sources {
             let t = Date()
             if s.skip {   // an Exclude row is never compared: it isn't copied
@@ -218,13 +218,12 @@ struct JobView: View {
                 }
             } else {
                 let target = j.target(for: s) ?? "/nonexistent-archivist-destination"
-                let count = $counted
                 let full = await JobView.walk({ stop in
                     try Survey.of(source: s.readPath, destination: target, excluded: j.excluded(in: s), patterns: s.namesLeftOut, stop: stop,
                                   onSize: { size in DispatchQueue.main.async { if store.surveys[s.id]?.compared != true { store.surveys[s.id] = size } } },
-                                  onCount: { n in DispatchQueue.main.async { count.wrappedValue[s.id] = n } })
+                                  onCount: { n in DispatchQueue.main.async { store.counted[s.id] = n } })
                 })
-                counted[s.id] = nil
+                store.counted[s.id] = nil
                 if let full {
                     store.surveys[s.id] = full
                     DevLog.write(String(format: "counted: %@, %d files, %d to copy, %.1f s", s.name, full.files, full.toCopy, Date().timeIntervalSince(t)))
@@ -232,12 +231,19 @@ struct JobView: View {
             }
             if Task.isCancelled { return }
         }
+        if !Task.isCancelled { store.walkedKey[id] = refreshKey }
     }
 
-    /// The one way to start a walk: the walk under way, if any, is cancelled first.
-    func kick() {
-        refreshTask?.cancel()
-        refreshTask = Task { await refresh() }
+    /// The one way to start a walk: the walk under way for this backup, if any, is cancelled first.
+    /// `resume` (the tab opened again, nothing changed): a walk still going carries on, and one
+    /// that finished with the same setup is not repeated.
+    func kick(resume: Bool = false) {
+        let key = refreshKey, id = job.id, store = store
+        if resume, store.walks[id]?.key == key || store.walkedKey[id] == key { return }
+        store.walks[id]?.task.cancel()
+        let token = UUID()
+        let task = Task { await refresh(); if store.walks[id]?.token == token { store.walks[id] = nil } }
+        store.walks[id] = (key, token, task)
     }
 
     /// Every source compared, or the walking is over. Start never waits for it: the backup
