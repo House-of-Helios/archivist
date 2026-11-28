@@ -59,6 +59,7 @@ struct RootView: View {
         .task {   // scheduled backups, while Archivist is open
             while !Task.isCancelled {
                 Scheduler.runDueInApp(store)
+                store.lookUpDestinations()   // at launch, then every minute: every tab's destination is ready
                 try? await Task.sleep(nanoseconds: 60_000_000_000)
             }
         }

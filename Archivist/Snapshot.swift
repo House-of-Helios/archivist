@@ -54,8 +54,8 @@ enum Snapshot {
         func window(_ job: Job, _ r: Runner, _ s: [Source.ID: Survey], _ d: [String: Drive], space: Bool, missing: Bool = false, update: UpdateInfo? = nil) -> AnyView {
             AnyView(VStack(spacing: 0) {
                 TitleStrip(selection: .constant(job.id), drawn: true, previewUpdate: update)
-                JobView(jobID: job.id, runnerOverride: r, destinationState: missing ? .folderMissing : .present, drives: d, presetSurveys: s,
-                        space: space ? (free: 4_940_000_000_000, total: 4_950_000_000_000) : nil, preset: true)
+                JobView(jobID: job.id, runnerOverride: r, destinationState: missing ? .folderMissing : .present, presetDrives: d, presetSurveys: s,
+                        presetSpace: space ? (free: 4_940_000_000_000, total: 4_950_000_000_000) : nil, preset: true)
             }.background(Palette.ground))
         }
         let screens: [(String, AnyView)] = [
@@ -66,7 +66,7 @@ enum Snapshot {
             ("update", window(studio, Runner(), surveys, drives, space: true, update: update)),
         ]
         let sheets: [(String, AnyView, CGSize)] = [
-            ("settings", AnyView(SettingsSheet(view: JobView(storeOverride: store, jobID: studio.id, runnerOverride: Runner(), destinationState: .present, drives: drives, presetSurveys: surveys, space: nil, preset: true))), CGSize(width: SettingsSheet.width, height: 760)),
+            ("settings", AnyView(SettingsSheet(view: JobView(storeOverride: store, jobID: studio.id, runnerOverride: Runner(), destinationState: .present, presetDrives: drives, presetSurveys: surveys, presetSpace: nil, preset: true))), CGSize(width: SettingsSheet.width, height: 760)),
             ("info-card", AnyView(InfoCard(live: 3, unreadable: ["Art Line NYC/apps/web/.env", "The House/build/SourcePackages/checkouts/swift-argument-parser/Plugins/GenerateManual/GenerateCommon", "Icon"], showFiles: true)), CGSize(width: 352, height: 420)),
             ("update-sheet", AnyView(UpdateSheet(update: update, current: "0.0.1", onLater: {}, onInstall: {})), CGSize(width: 480, height: 420)),
         ]

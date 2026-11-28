@@ -200,6 +200,21 @@ final class JobStore {
     /// Each backup's walk under way (one at a time per backup), its running counts, and the setup
     /// its last finished walk saw: they outlive a tab switch.
     var walks: [Job.ID: (key: String, token: UUID, task: Task<Void, Never>)] = [:]
+
+    /// Every backup's destination drive and room, looked up at launch and once a minute, for
+    /// every tab at once: a tab never waits for its own first look (Helios, 2026-11-28, twice).
+    @MainActor func lookUpDestinations() {
+        for d in Set(jobs.compactMap(\.destination)) {
+            Task { @MainActor in
+                if self.drives[d] == nil, let dr = await Task.detached(operation: { try? Drive.of(path: d) }).value { self.drives[d] = dr }
+                if let room = await Task.detached(operation: { () -> (Int64, Int64)? in
+                    let v = try? URL(fileURLWithPath: d).resourceValues(forKeys: [.volumeAvailableCapacityKey, .volumeTotalCapacityKey])
+                    guard let free = v?.volumeAvailableCapacity, let total = v?.volumeTotalCapacity else { return nil }
+                    return (Int64(free), Int64(total))
+                }).value { self.spaces[d] = (free: room.0, total: room.1) }
+            }
+        }
+    }
     var walkedKey: [Job.ID: String] = [:]
     var measuringJobs: Set<Job.ID> = []
     var counted: [Source.ID: Int] = [:]
@@ -224,8 +239,10 @@ final class JobStore {
         runner(for: id).start(ordered, planned: planned) { [weak self] summary, state, past, total in
             guard let self, let i = self.jobs.firstIndex(where: { $0.id == id }) else { return }
             var j = self.jobs[i]
-            j.lastResult = summary; j.lastState = state; j.lastPast = past ?? j.lastPast; j.lastRun = Date(); j.lastBytes = total
-            if let done = self.runner(for: id).finished { j.lastStart = done.start; j.lastSkipped = done.skipped }   // only a backup that ran to its end
+            j.lastResult = summary; j.lastState = state; j.lastPast = past ?? j.lastPast; j.lastRun = Date()
+            // Only a backup that ran to its end: a stopped one counted only the sources it finished
+            // ("Last backup: …, Zero KB" after a Stop).
+            if let done = self.runner(for: id).finished { j.lastStart = done.start; j.lastSkipped = done.skipped; j.lastBytes = total }
             self.update(j)
         }
     }

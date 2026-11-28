@@ -20,10 +20,15 @@ struct JobView: View {
     var counted: [Source.ID: Int] { store.counted }
     @State var destinationState: DestinationState = .present
     enum DestinationState { case present, folderMissing, driveMissing }
-    @State var drives: [String: Drive] = [:]          // path → drive, looked up off the main thread
+    var presetDrives: [String: Drive]? = nil           // snapshots
+    /// Path → drive and the destination's room, read straight from the store: a tab drawn
+    /// again shows them in its first frame (a copy into the tab's own state came a frame late,
+    /// and not at all when the walk was resumed instead of redone).
+    var drives: [String: Drive] { presetDrives ?? store.drives }
     var presetSurveys: [Source.ID: Survey]? = nil      // snapshots
     var surveys: [Source.ID: Survey] { presetSurveys ?? store.surveys }
-    @State var space: (free: Int64, total: Int64)?
+    var presetSpace: (free: Int64, total: Int64)? = nil   // snapshots
+    var space: (free: Int64, total: Int64)? { preset ? presetSpace : job.destination.flatMap { store.spaces[$0] } }
     var preset = false                                 // snapshots pass everything in
 
     var job: Job { store.jobs.first { $0.id == jobID } ?? Job(title: "") }
@@ -169,28 +174,12 @@ struct JobView: View {
         store.measuringJobs.remove(job.id)   // a cancelled walk left it set
         guard !preset else { return }
         let j = job
-        // What the store already knows shows at once: a tab switch never blanks the destination
-        // while it is looked up again (each tab's view starts empty).
-        for (p, d) in store.drives where drives[p] == nil { drives[p] = d }
-        if let d = j.destination, space == nil { space = store.spaces[d] }
-        // The destination first, even while a backup runs: its drive, room and presence.
-        if let d = j.destination {
-            if drives[d] == nil, let dr = await Task.detached(operation: { try? Drive.of(path: d) }).value { drives[d] = dr; store.drives[d] = dr }
-            if let room = await Task.detached(operation: { () -> (Int64, Int64)? in
-                let v = try? URL(fileURLWithPath: d).resourceValues(forKeys: [.volumeAvailableCapacityKey, .volumeTotalCapacityKey])
-                guard let free = v?.volumeAvailableCapacity, let total = v?.volumeTotalCapacity else { return nil }
-                return (Int64(free), Int64(total))
-            }).value {
-                space = (free: room.0, total: room.1); store.spaces[d] = space
-            }
-            // Is the destination still there? A deleted folder or an unplugged drive must say so.
-            destinationState = await JobView.where_(d)
-        }
+        await refreshDestination()
         guard !runner.running else { return }   // a backup under way walks the trees itself
         JobView.lastCheck = Date()
         Access.shared.touch(j.sources.map(\.readPath) + [j.destination].compactMap { $0 })   // any permission popup shows now, not after Start
         for p in j.sources.map(\.readPath) where drives[p] == nil {
-            if let d = await Task.detached(operation: { try? Drive.of(path: p) }).value { drives[p] = d; store.drives[p] = d }
+            if let d = await Task.detached(operation: { try? Drive.of(path: p) }).value { store.drives[p] = d }
         }
         // A run lock whose process is gone (or is this app, not copying now) = a backup that was cut off.
         let me = getpid()
@@ -234,12 +223,32 @@ struct JobView: View {
         if !Task.isCancelled { store.walkedKey[id] = refreshKey }
     }
 
+    /// The destination's drive, room and presence, even while a backup runs; into the store, so
+    /// every tab of this destination shows them at once.
+    func refreshDestination() async {
+        guard !preset, let d = job.destination else { return }
+        let store = store
+        if store.drives[d] == nil, let dr = await Task.detached(operation: { try? Drive.of(path: d) }).value { store.drives[d] = dr }
+        if let room = await Task.detached(operation: { () -> (Int64, Int64)? in
+            let v = try? URL(fileURLWithPath: d).resourceValues(forKeys: [.volumeAvailableCapacityKey, .volumeTotalCapacityKey])
+            guard let free = v?.volumeAvailableCapacity, let total = v?.volumeTotalCapacity else { return nil }
+            return (Int64(free), Int64(total))
+        }).value {
+            store.spaces[d] = (free: room.0, total: room.1)
+        }
+        // Is the destination still there? A deleted folder or an unplugged drive must say so.
+        destinationState = await JobView.where_(d)
+    }
+
     /// The one way to start a walk: the walk under way for this backup, if any, is cancelled first.
     /// `resume` (the tab opened again, nothing changed): a walk still going carries on, and one
     /// that finished with the same setup is not repeated.
     func kick(resume: Bool = false) {
         let key = refreshKey, id = job.id, store = store
-        if resume, store.walks[id]?.key == key || store.walkedKey[id] == key { return }
+        if resume, store.walks[id]?.key == key || store.walkedKey[id] == key {
+            Task { await refreshDestination() }   // the walk carries on; the destination is looked at again
+            return
+        }
         store.walks[id]?.task.cancel()
         let token = UUID()
         let task = Task { await refresh(); if store.walks[id]?.token == token { store.walks[id] = nil } }
@@ -357,8 +366,10 @@ struct SourcesPane: View {
                 }
                 if needed > 0 { Spacer() }
                 if !job.sources.isEmpty {
-                    (Text("\(job.sources.count) \(job.sources.count == 1 ? "item" : "items"), ")
-                     + Text(bytes(total)).fontWeight(.semibold).foregroundColor(Palette.ink))
+                    // No size until one is known: "Zero KB" while a folder was still being sized read as empty.
+                    let sized = job.sources.contains { !$0.skip && view.surveys[$0.id] != nil }
+                    (Text("\(job.sources.count) \(job.sources.count == 1 ? "item" : "items")" + (sized ? ", " : ""))
+                     + Text(sized ? bytes(total) : "").fontWeight(.semibold).foregroundColor(Palette.ink))
                         .font(Typeface.text(13)).foregroundStyle(Palette.soft)
                         .offset(y: 1.5)
                 }
@@ -398,12 +409,13 @@ struct SourceRow: View {
     let view: JobView
     let source: Source
     @State private var finderIcon: NSImage?
+    @MainActor static var finderIcons: [String: NSImage] = [:]
 
     var body: some View {
         let s = source
         HStack(spacing: 14) {
             Group {
-                if s.hasCustomIcon, let finderIcon {   // the person's own Finder icon, as Finder shows it
+                if s.hasCustomIcon, let finderIcon = finderIcon ?? SourceRow.finderIcons[s.path] {   // the person's own Finder icon, as Finder shows it
                     Image(nsImage: finderIcon).resizable().interpolation(.high).frame(width: 40, height: 40)
                 } else {
                     Badge(icon: s.isDrive ? driveSymbol(view.drive(s.readPath)) : s.icon, hex: s.color, size: 38)
@@ -420,10 +432,13 @@ struct SourceRow: View {
                 // Read once, off the main thread: on a network drive each look is a trip to the
                 // server, and the row redraws often (the count while walking); on the main
                 // thread it froze the window.
+                // Kept per path for the app's life: a tab drawn again shows it in its first frame.
                 .task(id: s.path) {
-                    guard s.hasCustomIcon else { return }
+                    guard s.hasCustomIcon, SourceRow.finderIcons[s.path] == nil else { return }
                     let path = s.path
-                    finderIcon = await Task.detached { NSWorkspace.shared.icon(forFile: path) }.value
+                    let icon = await Task.detached { NSWorkspace.shared.icon(forFile: path) }.value
+                    SourceRow.finderIcons[path] = icon
+                    finderIcon = icon
                 }
             VStack(alignment: .leading, spacing: 3) {
                 Text(s.name).font(Typeface.text(15, .semibold)).foregroundStyle(Palette.ink.opacity(s.skip ? 0.5 : 1))
@@ -635,7 +650,7 @@ struct DestinationPane: View {
         f.doesRelativeDateFormatting = true
         f.dateStyle = .medium
         f.timeStyle = .short
-        return f.string(from: when) + (size.map { ", " + bytes($0) } ?? "")
+        return f.string(from: when) + (size.flatMap { $0 > 0 ? ", " + bytes($0) : nil } ?? "")
     }
 
     /// "My Drive / Backups": the drive, then the folder inside it (just the drive at its top).
