@@ -194,6 +194,9 @@ final class JobStore {
     var anyRunning: Bool { runners.values.contains { $0.running } }
     /// What each source holds and how it compares, kept across tab switches.
     var surveys: [Source.ID: Survey] = [:]
+    /// Each path's drive and each destination's room, kept across tab switches.
+    var drives: [String: Drive] = [:]
+    var spaces: [String: (free: Int64, total: Int64)] = [:]
 
     /// Starts a backup: the button and the dev remote both come here.
     func start(_ id: Job.ID, planned: (files: Int, bytes: Int64) = (0, 0)) {
@@ -349,6 +352,10 @@ final class Runner {
     var running = false
     var stopping = false                 // Stop pressed: say so at once, even while the drive finishes
     var currentSource: String?
+    /// Which source is copying and which are done, for the bar: each source's chunk fills with
+    /// its own progress, not with the time estimate (Helios, 2026-11-28).
+    var currentSourceID: Source.ID?
+    var doneSources: Set<Source.ID> = []
     var plannedFiles = 0
     var plannedSmall = 0
     var doneSmall = 0
@@ -427,6 +434,8 @@ final class Runner {
         plannedFiles = planned.files
         plannedBytes = planned.bytes
         doneFiles = 0
+        doneSources = []
+        currentSourceID = nil
         doneBytes = 0
         doneSmall = 0
         doneBig = 0
@@ -452,7 +461,7 @@ final class Runner {
                 opts.pastRoot = job.pastRoot
                 opts.pastSubfolder = source.name
                 opts.stamp = stamp
-                DispatchQueue.main.async { self.currentSource = source.name }
+                DispatchQueue.main.async { self.currentSource = source.name; self.currentSourceID = source.id }
                 let engine = Engine(source: src, destination: dst, options: opts)
                 DispatchQueue.main.async {
                     self.engine = engine
@@ -461,7 +470,7 @@ final class Runner {
                     if let s = self.source, let d = self.destination { self.lanes = Lanes.choose(source: s.kind, destination: d.kind) }
                     self.lastSample = (Date(), self.overall.bytes, self.overall.files)
                 }
-                engine.onProgress = { p in DispatchQueue.main.async { self.tick(p) } }
+                engine.onProgress = { p in DispatchQueue.main.async { self.tick(p); if p.stage == .copying { Access.shared.answered([src, dst]) } } }
                 do {
                     DevLog.write("source start: \(source.name) (\(src)) -> \(dst)")
                     let r = try engine.run()
@@ -472,6 +481,7 @@ final class Runner {
                         r.seconds, mbs, r.seconds > 0 ? Double(r.copied) / r.seconds : 0, r.problems.count, r.stopped ? " STOPPED" : ""))
                     for p in r.problems.prefix(20) { DevLog.write("  problem: \(p)") }
                     DispatchQueue.main.async {
+                        self.doneSources.insert(source.id)
                         self.doneFiles += self.progress.filesTotal
                         self.doneBytes += self.progress.bytesTotal
                         self.doneSmall += self.progress.smallTotal

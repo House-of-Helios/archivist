@@ -182,7 +182,9 @@ enum DevControl {
             if let r, r.running, let o {
                 d["running"] = ["files": o.files, "filesTotal": o.filesTotal, "bytes": o.bytes, "bytesTotal": o.bytesTotal,
                                 "mbPerSecond": r.bytesPerSecond / 1e6, "source": r.currentSource ?? "",
-                                "eta": r.remaining(at: Date()) ?? -1, "finishing": r.finishing]
+                                "eta": r.remaining(at: Date()) ?? -1, "finishing": r.finishing,
+                                "doneSources": j.sources.filter { r.doneSources.contains($0.id) }.map(\.name),
+                                "sourceBytes": [r.progress.bytesDone, r.progress.bytesTotal]]
             }
             return d
         }

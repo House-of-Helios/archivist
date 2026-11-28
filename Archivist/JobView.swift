@@ -166,25 +166,32 @@ struct JobView: View {
     @MainActor static var lastCheck = Date.distantPast
 
     func refresh() async {
-        measuring = false   // a cancelled walk left it set; a backup under way walks the tree itself
-        guard !preset, !runner.running else { return }
-        JobView.lastCheck = Date()
+        measuring = false   // a cancelled walk left it set
+        guard !preset else { return }
         let j = job
-        Access.shared.touch(j.sources.map(\.readPath))   // any permission popup shows now, not after Start
-        var paths = j.sources.map(\.readPath)
-        if let d = j.destination { paths.append(d) }
-        for p in paths where drives[p] == nil {
-            if let d = await Task.detached(operation: { try? Drive.of(path: p) }).value { drives[p] = d }
-        }
+        // What the store already knows shows at once: a tab switch never blanks the destination
+        // while it is looked up again (each tab's view starts empty).
+        for (p, d) in store.drives where drives[p] == nil { drives[p] = d }
+        if let d = j.destination, space == nil { space = store.spaces[d] }
+        // The destination first, even while a backup runs: its drive, room and presence.
         if let d = j.destination {
-            space = await Task.detached { () -> (Int64, Int64)? in
+            if drives[d] == nil, let dr = await Task.detached(operation: { try? Drive.of(path: d) }).value { drives[d] = dr; store.drives[d] = dr }
+            if let room = await Task.detached(operation: { () -> (Int64, Int64)? in
                 let v = try? URL(fileURLWithPath: d).resourceValues(forKeys: [.volumeAvailableCapacityKey, .volumeTotalCapacityKey])
                 guard let free = v?.volumeAvailableCapacity, let total = v?.volumeTotalCapacity else { return nil }
                 return (Int64(free), Int64(total))
-            }.value.map { (free: $0.0, total: $0.1) }
+            }).value {
+                space = (free: room.0, total: room.1); store.spaces[d] = space
+            }
+            // Is the destination still there? A deleted folder or an unplugged drive must say so.
+            destinationState = await JobView.where_(d)
         }
-        // Is the destination still there? A deleted folder or an unplugged drive must say so.
-        if let d = j.destination { destinationState = await JobView.where_(d) }
+        guard !runner.running else { return }   // a backup under way walks the trees itself
+        JobView.lastCheck = Date()
+        Access.shared.touch(j.sources.map(\.readPath) + [j.destination].compactMap { $0 })   // any permission popup shows now, not after Start
+        for p in j.sources.map(\.readPath) where drives[p] == nil {
+            if let d = await Task.detached(operation: { try? Drive.of(path: p) }).value { drives[p] = d; store.drives[p] = d }
+        }
         // A run lock whose process is gone (or is this app, not copying now) = a backup that was cut off.
         let me = getpid()
         let busy = runner.running
@@ -258,7 +265,7 @@ struct JobView: View {
     // MARK: actions
 
     func backUp() {
-        Access.shared.touch(job.sources.filter { !$0.skip }.map(\.readPath))
+        Access.shared.touch(job.sources.filter { !$0.skip }.map(\.readPath) + [job.destination].compactMap { $0 })
         let live = job.sources.filter { !$0.skip }.compactMap { surveys[$0.id] }.filter(\.compared)
         store.start(job.id, planned: (live.reduce(0) { $0 + $1.toCopy }, live.reduce(0) { $0 + $1.bytesToCopy }))
     }
@@ -291,6 +298,7 @@ struct JobView: View {
 
     /// Same destination, same animal: the backup's look follows it until picked by hand.
     func setDestination(_ path: String) {
+        Access.shared.touch([path])   // a removable or network drive asks now, while the person is here
         edit { j in
             j.destination = path
             j.lastStart = nil; j.lastSkipped = [:]   // what the last backup found belongs to the old destination
@@ -722,16 +730,22 @@ struct BottomBar: View {
                             }
                         }
                         if r.running && !estimating {
+                            // Each source's chunk fills with that source's own work: done ones full, the
+                            // one copying by its bytes (files when it has no bytes), the rest empty. The
+                            // time estimate lives in the words under the bar, not here.
                             HStack(spacing: 3) {
                                 ForEach(chunks, id: \.s.id) { c in
+                                    let p = r.progress
+                                    let f: Double = r.doneSources.contains(c.s.id) ? 1
+                                        : r.currentSourceID != c.s.id ? 0
+                                        : p.bytesTotal > 0 ? Double(p.bytesDone) / Double(p.bytesTotal)
+                                        : p.filesTotal > 0 ? Double(p.filesDone) / Double(p.filesTotal) : 0
                                     // Dark: the soft colours of the circles; full strength glared on a dark track.
                                     Rectangle().fill(scheme == .dark ? Nippon.soft(c.s.color, white: 0.3) : Nippon.color(c.s.color))
-                                        .frame(width: widths[c.s.id] ?? 4)
+                                        .frame(width: (widths[c.s.id] ?? 4) * min(max(f, 0), 1))
+                                        .frame(width: widths[c.s.id] ?? 4, alignment: .leading)
+                                        .animation(.linear(duration: 1), value: f)
                                 }
-                            }
-                            .mask(alignment: .leading) {
-                                Rectangle().frame(width: g.size.width * r.steadyFraction(at: tl.date))
-                                    .animation(.linear(duration: 1), value: r.steadyFraction(at: tl.date))
                             }
                         }
                         if estimating {
@@ -1035,6 +1049,8 @@ struct SettingsSheet: View {
                 }
                 .frame(maxWidth: .infinity)
 
+                Permissions()
+
                 Divider()
                 HStack {
                     Button("Delete this backup…", role: .destructive) { confirmDelete = true }
@@ -1304,5 +1320,46 @@ struct InfoCard: View {
         .fixedSize(horizontal: false, vertical: true)
         .frame(width: 320, alignment: .leading).padding(16)
         .background(Palette.raised)
+    }
+}
+
+/// The Mac permissions Archivist uses, each opening its own page in System Settings. macOS
+/// lets an app ask (on first use) but never switch a permission itself, so these are doors,
+/// not switches; Full Disk Access shows whether it is on, the one macOS lets an app see.
+struct Permissions: View {
+    @State private var fullDisk = Permissions.hasFullDiskAccess()
+
+    /// Opening the TCC database is refused without Full Disk Access, and asks nothing.
+    static func hasFullDiskAccess() -> Bool {
+        let fd = open("/Library/Application Support/com.apple.TCC/TCC.db", O_RDONLY)
+        if fd >= 0 { close(fd); return true }
+        return false
+    }
+
+    private func row(_ title: String, _ detail: String, state: Bool?, pane: String) -> some View {
+        HStack(spacing: 10) {
+            if let state {
+                Circle().fill(state ? Palette.good : Palette.soft.opacity(0.5)).frame(width: 8, height: 8)
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(Typeface.text(13, .semibold)).foregroundStyle(Palette.ink)
+                Text(detail).font(Typeface.text(11.5)).foregroundStyle(Palette.soft).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button("Open") { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?" + pane)!) }
+                .buttonStyle(QuietButton())
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Permissions").font(Typeface.text(13, .semibold)).foregroundStyle(Palette.soft).frame(maxWidth: .infinity)
+            row("Files & Folders", "Shared folders, external drives, Desktop and Documents", state: nil, pane: "Privacy_FilesAndFolders")
+            row("Full Disk Access", fullDisk ? "On: whole drives and your home folder" : "Off: needed for whole drives and your home folder",
+                state: fullDisk, pane: "Privacy_AllFiles")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            fullDisk = Permissions.hasFullDiskAccess()   // back from System Settings: the answer may have changed
+        }
     }
 }

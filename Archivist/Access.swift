@@ -14,11 +14,21 @@ final class Access {
     /// Paths whose first read hasn't come back after `patience` seconds.
     private(set) var waiting: Set<String> = []
     private var pending: Set<String> = []
+    /// Places that have answered a read this session. macOS asks once per kind of place, so a
+    /// drive that answered never shows the permission message again: a later slow read there is
+    /// a busy drive or network (seen while another backup filled the share), not a question.
+    private var answered: Set<String> = []
+
+    /// A drive under /Volumes counts as one place; a folder elsewhere (Desktop, Documents…) is its own.
+    nonisolated static func place(_ path: String) -> String {
+        let c = (path as NSString).pathComponents
+        return c.count >= 3 && c[1] == "Volumes" ? "/Volumes/" + c[2] : path
+    }
     nonisolated static let patience: Double = 5
 
     /// Read the top of each folder off the main thread; a read that hangs past `patience` is named.
     func touch(_ paths: [String]) {
-        for p in paths where !pending.contains(p) {
+        for p in paths where !pending.contains(p) && !answered.contains(Access.place(p)) {
             pending.insert(p)
             let started = Date()
             Thread.detachNewThread {
@@ -26,6 +36,7 @@ final class Access {
                 let took = Date().timeIntervalSince(started)
                 DispatchQueue.main.async {
                     Access.shared.pending.remove(p)
+                    Access.shared.answered.insert(Access.place(p))
                     if Access.shared.waiting.remove(p) != nil {
                         DevLog.write(String(format: "access: %@ answered after %.0f s", p, took))
                     }
@@ -37,6 +48,12 @@ final class Access {
                 DevLog.write("access: \(p) still waiting after \(Int(Access.patience)) s (permission popup?)")
             }
         }
+    }
+
+    /// Places a running backup is already reading or writing have answered.
+    func answered(_ paths: [String]) {
+        for p in paths { answered.insert(Access.place(p)) }
+        waiting = waiting.filter { !answered.contains(Access.place($0)) }
     }
 
     func isWaiting(_ path: String) -> Bool { waiting.contains(path) }
